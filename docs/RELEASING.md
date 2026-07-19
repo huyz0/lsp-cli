@@ -14,12 +14,12 @@ a `checksums.txt`, then (if the secret below is configured) updates the
 Homebrew tap.
 
 No Windows build: `src/main.rs` has a deliberate `compile_error!` for
-non-Unix targets — the daemon (used by every navigation command for warm
+non-Unix targets. The daemon (used by every navigation command for warm
 server reuse) is Unix Domain Socket-only today, with no Windows named-pipe
 transport implemented yet. A winget job (using
 [vedantmgoyal9/winget-releaser](https://github.com/vedantmgoyal9/winget-releaser),
 the same action [rtk-ai/rtk](https://github.com/rtk-ai/rtk) uses) makes
-sense to add once that exists — see git history for the one that was
+sense to add once that exists. See git history for the one that was
 removed here after the first real CI run proved Windows doesn't compile.
 
 `workflow_dispatch` with a `tag` input re-runs the same pipeline against an
@@ -28,7 +28,7 @@ version.
 
 ## One-time setup for Homebrew publishing
 
-Optional — the release itself (GitHub Release with binaries) always
+Optional. The release itself (GitHub Release with binaries) always
 works. The publishing job checks for its secret and skips quietly if it's
 missing, so leaving this unconfigured never fails a release.
 

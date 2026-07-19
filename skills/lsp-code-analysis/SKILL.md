@@ -28,7 +28,7 @@ lsp install --list              # see what's installed
 lsp install typescript          # install TypeScript/JS server
 lsp install python              # install Python (basedpyright)
 lsp install go                  # install Go (gopls)
-lsp install java                # install Java (jdtls) — requires a JDK already
+lsp install java                # install Java (jdtls), requires a JDK already
                                  # present (sdkman, $JAVA_HOME, or `java` on PATH)
 ```
 
@@ -37,10 +37,8 @@ command and stays warm in a background daemon, reused across calls (even
 across separate CLI invocations) until it's been idle for 10 minutes. You do
 not need to call `lsp server start` manually.
 
-**deno** is detected on `PATH` and used if present, but never auto-installed —
-install it yourself from https://deno.land if needed.
-
----
+**deno** is detected on `PATH` and used if present, but never auto-installed.
+Install it yourself from https://deno.land if needed.
 
 ## Commands
 
@@ -99,7 +97,7 @@ lsp calls src/service.ts --scope createUser                       # who calls cr
 lsp calls src/service.ts --scope createUser --direction outgoing  # what createUser calls
 ```
 
-More precise than `reference` for impact analysis — it only follows actual
+More precise than `reference` for impact analysis. It only follows actual
 call sites, not every textual usage (imports, type annotations, reads/writes
 of a variable with the same name).
 
@@ -113,7 +111,7 @@ lsp diagnostics src/service.ts
 
 **Run this after editing a file** to check it still compiles/typechecks,
 instead of invoking the project's own build tool. Not every language server
-supports this yet — if it fails, the error message says so explicitly.
+supports this yet. If it fails, the error message says so explicitly.
 
 ### `lsp symbol <file> --scope <symbol>`
 
@@ -124,7 +122,7 @@ lsp symbol src/models.ts --scope User.greet
 lsp symbol src/models.ts --scope 22
 ```
 
-Prefer this over `read` for targeted code inspection — avoids loading entire files.
+Prefer this over `read` for targeted code inspection: avoids loading entire files.
 
 ### `lsp search "<query>"`
 
@@ -140,7 +138,7 @@ Kind values: `class`, `interface`, `function`, `method`, `variable`, `constant`,
 
 ### `lsp locate <file> --scope <scope>`
 
-Verify that a scope+find pattern resolves correctly before using it in other commands. Runs purely locally — no LSP server, no daemon, no network. Use this whenever `--find` isn't matching what you expect, instead of debugging by trial and error against the LSP commands.
+Verify that a scope+find pattern resolves correctly before using it in other commands. Runs purely locally: no LSP server, no daemon, no network. Use this whenever `--find` isn't matching what you expect, instead of debugging by trial and error against the LSP commands.
 
 ```bash
 lsp locate src/models.ts --scope User
@@ -155,8 +153,6 @@ Show running servers, their PID, and idle time.
 lsp server list
 ```
 
----
-
 ## Schema & Introspection
 
 Agents can dynamically list commands and retrieve the exact JSON Schema for their input arguments using the `schema` command instead of relying on this documentation:
@@ -166,8 +162,6 @@ lsp schema              # list all endpoint schemas
 lsp schema definition   # show the input schema for `definition`
 ```
 
----
-
 ## Locate Syntax
 
 The `--scope` and `--find` options are shared across all navigation commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `locate`):
@@ -175,7 +169,7 @@ The `--scope` and `--find` options are shared across all navigation commands (`o
 | Format | Meaning |
 |--------|---------|
 | `42` | Line 42 |
-| `10,20` | Lines 10–20 |
+| `10,20` | Lines 10-20 |
 | `MyClass` | Top-level symbol named `MyClass` |
 | `MyClass.method` | Nested symbol |
 | `10,0` | Line 10 to end of file |
@@ -186,10 +180,8 @@ The `--scope` and `--find` options are shared across all navigation commands (`o
 - If omitted, the position defaults to the start of `--scope`
 
 If a command errors with "Symbol not found" or returns unexpected results,
-run `lsp locate` with the same `--scope`/`--find` first — it's free (no LSP
+run `lsp locate` with the same `--scope`/`--find` first. It's free (no LSP
 round trip) and will show exactly what position it resolved to.
-
----
 
 ## Pagination
 
@@ -204,10 +196,8 @@ lsp reference src/models.ts --scope User --max-items 20 --start-index 20 --pagin
 ```
 
 `--pagination-id` is accepted for interface compatibility but each call still
-queries the LSP server fresh — there's no server-side cursor to invalidate,
+queries the LSP server fresh. There's no server-side cursor to invalidate,
 so re-running page 1 after other edits is safe.
-
----
 
 ## Recommended Workflows
 
@@ -254,8 +244,6 @@ lsp definition src/service.ts --scope processData
 lsp reference src/service.ts --scope processData
 ```
 
----
-
 ## Tool Selection Guide
 
 | Task | Traditional | Recommended |
@@ -270,8 +258,6 @@ lsp reference src/service.ts --scope processData
 
 **Rule**: Prefer `lsp` commands over `read`/`grep` for all code understanding tasks. Use `read`/`grep` only for literal string searches or comments.
 
----
-
 ## Notes specific to this Rust port
 
 - **Warm servers**: navigation commands proxy through a background daemon and
@@ -280,24 +266,22 @@ lsp reference src/service.ts --scope processData
   `idleTimeout`, in milliseconds). The first call for a project pays LSP
   startup cost; subsequent calls are fast.
 - **File watching**: while a server is warm, external edits to files in its
-  project are detected automatically and pushed to the server — you don't
+  project are detected automatically and pushed to the server, so you don't
   need to restart the server after editing a file outside of the command
   you're running.
 - If a server seems stuck or stale after an external process crashed it,
   `lsp server stop <project>` (or `--all`) forces a clean respawn on the next
   call.
 
----
-
 ## Troubleshooting
 
 | Symptom | Try this |
 |---|---|
-| "Symbol not found" or wrong location resolved | Run `lsp locate <file> --scope ... --find ...` with the same arguments — it's free (no LSP round trip) and shows exactly what position it resolved to. |
+| "Symbol not found" or wrong location resolved | Run `lsp locate <file> --scope ... --find ...` with the same arguments. It's free (no LSP round trip) and shows exactly what position it resolved to. |
 | "Cannot detect project root" | The file isn't under a recognized root marker (package.json, Cargo.toml, go.mod, etc). Pass `--project <path>` explicitly. |
-| Command errors with an "Unknown mode"/"Unknown --output value" message | The value you passed is invalid and was rejected — these commands fail loudly rather than silently falling back to a default, so check the message's list of valid values. |
+| Command errors with an "Unknown mode"/"Unknown --output value" message | The value you passed is invalid and was rejected. These commands fail loudly rather than silently falling back to a default, so check the message's list of valid values. |
 | Results look stale after you (or another process) edited a file | Should self-correct: warm servers watch their project directory and get notified of external edits automatically. If it doesn't, `lsp server stop <project>` forces a clean respawn. |
-| A navigation command hangs or a server seems wedged | `lsp server list` to see what's running and its PID; `lsp server stop <project>` (or `--all`) to force a respawn on the next call. |
-| `lsp diagnostics` returns no items but you know there's an error | Not every language server supports this yet (the error message says so explicitly if the request itself failed). If it returned an *empty* list instead of erroring, the server may not have finished analyzing yet — this is best-effort and doesn't retry. |
-| Auto-install fails for `java` | Requires a JDK already present via sdkman, `$JAVA_HOME`, or `java` on `PATH` — this tool won't install a JDK for you. |
-| `deno` isn't detected | It's never auto-installed — must already be on `PATH`. Install it from https://deno.land. |
+| A navigation command hangs or a server seems wedged | `lsp server list` to see what's running and its PID, then `lsp server stop <project>` (or `--all`) to force a respawn on the next call. |
+| `lsp diagnostics` returns no items but you know there's an error | Not every language server supports this yet (the error message says so explicitly if the request itself failed). If it returned an *empty* list instead of erroring, the server may not have finished analyzing yet. This is best-effort and doesn't retry. |
+| Auto-install fails for `java` | Requires a JDK already present via sdkman, `$JAVA_HOME`, or `java` on `PATH`. This tool won't install a JDK for you. |
+| `deno` isn't detected | It's never auto-installed, must already be on `PATH`. Install it from https://deno.land. |

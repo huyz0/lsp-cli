@@ -40,7 +40,7 @@ cd <this repo>/tests/fixtures/typescript_project && npm install typescript
 
 `ruby-lsp` composes its own Bundler-managed bundle on every startup (see
 [docs/language-support.md](docs/language-support.md#ruby)), which needs a
-working Bundler plus a writable gem/bundle path — the system gem directory
+working Bundler plus a writable gem/bundle path. The system gem directory
 usually isn't writable by a non-root user, and installing a native gem
 extension (`psych`) needs the `libyaml` headers. Without root, or with an
 unprivileged gem setup, this fails partway through in a way that looks like
@@ -52,7 +52,7 @@ sudo apt install -y libyaml-dev   # or your distro's libyaml headers package
 gem install bundler --user-install
 gem install ruby-lsp --user-install --no-document --bindir ~/.lsp-cli/servers
 
-# Both need to be set wherever the lsp daemon process is started from —
+# Both need to be set wherever the lsp daemon process is started from:
 # PATH so ruby-lsp can find `bundle`, BUNDLE_PATH so the composed bundle
 # it builds per-project doesn't try to write into the (likely read-only)
 # system gem directory.
@@ -82,22 +82,22 @@ under `tests/`, against fixture projects in `tests/fixtures/`:
   matching (`locate.rs`), language/project-root detection (`registry.rs`),
   config defaults *and* `load_config`'s actual file-reading/merging logic
   against real tempfiles (`config.rs`), formatter output shape
-  (`format.rs`), and install.rs's pure logic — every rust-analyzer OS/arch
+  (`format.rs`), and install.rs's pure logic: every rust-analyzer OS/arch
   release-triple mapping plus the unsupported-platform error path, the
   node-wrapper shell script generation, and npm-spec-table invariants
   (`install.rs`).
 - **Integration** (`tests/*.rs`, spawning the built binary via
-  `CARGO_BIN_EXE_lsp`): `help`, `schema`, `locate` (no LSP server needed —
+  `CARGO_BIN_EXE_lsp`): `help`, `schema`, `locate` (no LSP server needed,
   always run); `outline`/`definition`/`reference`/`doc`/`symbol`/`calls`/
   `diagnostics`/`search` for TypeScript; `python.rs`, `go_lang.rs`,
   `rust_lang.rs`, `web.rs` (CSS/JSON/HTML), `java_kotlin.rs`,
   `markdown_lang.rs` for the other languages (each skips with a message if
-  its server isn't installed — see
+  its server isn't installed, see
   [docs/language-support.md](docs/language-support.md) for what's actually
   installed and passing in a given environment). `mcp_stdio.rs` speaks the
   JSON-RPC protocol directly over the child process's stdio (`initialize`,
   `tools/list`, `tools/call`, unknown-tool error).
-- **`server.rs`** exercises the real background daemon lifecycle — no LSP
+- **`server.rs`** exercises the real background daemon lifecycle. No LSP
   server needed for list/stop/shutdown against an empty/no-daemon state;
   3 more (gated on `has_ts_server()`) cover daemon concurrency:
   `kill_and_reload_respawns_a_dead_server` (kills a real child PID via
