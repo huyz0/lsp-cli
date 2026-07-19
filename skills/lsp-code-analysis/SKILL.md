@@ -1,6 +1,6 @@
 ---
 name: lsp-code-analysis
-description: Default to this over grep/read for any code understanding task (find a definition, list a file's symbols, find usages, check a function's signature, verify a file still compiles). Returns only the relevant symbol or location instead of a full file or a page of grep matches to filter by eye, which is the main cost driver on codebases with common/short identifier names or large files. Also does things grep/read structurally can't: compiler diagnostics, call-hierarchy tracing, go-to-definition across files.
+description: Code intelligence via LSP: definitions, references, outlines, docs, call hierarchy, diagnostics. Default to this over grep/read for code understanding tasks. It returns just the matching symbol or location instead of a full file or a page of grep noise to filter by hand, and does what grep/read can't: verify a file compiles, trace real call sites instead of text matches.
 ---
 
 # LSP Code Analysis
