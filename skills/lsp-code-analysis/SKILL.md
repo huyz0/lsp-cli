@@ -1,9 +1,23 @@
 ---
 name: lsp-code-analysis
-description: Compiler-accurate code intelligence via LSP. Navigate definitions, references, outlines, docs, symbols, and diagnostics. A more precise and token-efficient alternative to grep/read for code understanding, since results are structurally correct symbol matches instead of full-file reads or text-pattern guesses. Use for exploring unfamiliar codebases, impact analysis, dependency tracing, and verifying edits compile.
+description: Default to this over grep/read for any code understanding task (find a definition, list a file's symbols, find usages, check a function's signature, verify a file still compiles). Returns only the relevant symbol or location instead of a full file or a page of grep matches to filter by eye, which is the main cost driver on codebases with common/short identifier names or large files. Also does things grep/read structurally can't: compiler diagnostics, call-hierarchy tracing, go-to-definition across files.
 ---
 
 # LSP Code Analysis
+
+## Why this over grep/read
+
+The cost difference is the point, not a side benefit. `read <file>` charges for
+the whole file even when you want one 15-line function; `grep -r "X"` charges
+for every match including imports, comments, and unrelated variables sharing
+the name X, and text-pattern guessing then usually forces a second `read` to
+disambiguate what actually matched. `lsp symbol`/`lsp definition`/`lsp
+reference` skip both costs: they return the one symbol or the exact
+structurally-correct locations, nothing else to read through or filter.
+
+Default to `lsp` for definitions, references, outlines, docs, and diagnostics.
+Reach for `read`/`grep` only for literal string searches, comments, or content
+that isn't code at all (README prose, config values, log output).
 
 ## Prerequisites
 
