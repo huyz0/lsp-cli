@@ -43,8 +43,7 @@ Or grab a prebuilt binary directly from
 includes a `checksums.txt` so you can verify what you downloaded
 (`sha256sum -c checksums.txt`) before running it.
 
-**Don't want to run a binary someone else built?** Build from source
-instead — same code, compiled by you (requires a
+Alternatively, build from source (requires a
 [Rust toolchain](https://rustup.rs)):
 
 ```bash
@@ -55,9 +54,6 @@ cargo build --release
 ```
 
 Put `target/release/lsp` on your `PATH` (or symlink it) so it's just `lsp`.
-Every release is built from a tagged commit in this repo's history — `git
-checkout <tag>` before building gets you the exact source a given release
-binary came from, if you want to diff it yourself.
 
 Language servers are a separate concern — see [Supported languages](#supported-languages)
 below. Most install themselves automatically the first time you use them.
