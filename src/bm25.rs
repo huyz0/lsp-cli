@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use walkdir::WalkDir;
 
+use crate::protocol::symbol_kind::{
+    CLASS, ENUM, FIELD, FUNCTION, INTERFACE, KEY, METHOD, MODULE, STRUCT,
+};
 use crate::protocol::{Location, Position, Range, SymbolInformation};
 
 const K1: f64 = 1.5;
@@ -62,6 +65,15 @@ struct LangPatterns {
     go: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
     rs: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
     java_kt: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    cpp: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    lua: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    zig: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    ruby: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    csharp: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    bash: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    css: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    json: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
+    html: std::sync::OnceLock<Vec<(regex::Regex, u32)>>,
 }
 
 static PATTERNS: LangPatterns = LangPatterns {
@@ -70,6 +82,15 @@ static PATTERNS: LangPatterns = LangPatterns {
     go: std::sync::OnceLock::new(),
     rs: std::sync::OnceLock::new(),
     java_kt: std::sync::OnceLock::new(),
+    cpp: std::sync::OnceLock::new(),
+    lua: std::sync::OnceLock::new(),
+    zig: std::sync::OnceLock::new(),
+    ruby: std::sync::OnceLock::new(),
+    csharp: std::sync::OnceLock::new(),
+    bash: std::sync::OnceLock::new(),
+    css: std::sync::OnceLock::new(),
+    json: std::sync::OnceLock::new(),
+    html: std::sync::OnceLock::new(),
 };
 
 fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
@@ -145,6 +166,111 @@ fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
                 ),
             ]
         }),
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => PATTERNS.cpp.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*(?:typedef\s+)?(?:struct|class)\s+(\w+)").unwrap(),
+                    CLASS,
+                ),
+                (regex::Regex::new(r"^\s*namespace\s+(\w+)").unwrap(), MODULE),
+                (
+                    // Loosely matches a function definition (return type +
+                    // name + parens + opening brace on the same line) —
+                    // same tradeoff as the existing Java/C# heuristics:
+                    // misses multi-line signatures, doesn't try to exclude
+                    // control-flow keywords that share the shape.
+                    regex::Regex::new(r"^\s*(?:static\s+|inline\s+|virtual\s+)?[\w:<>\*&]+\s+(\w+)\s*\([^;]*\)\s*\{").unwrap(),
+                    FUNCTION,
+                ),
+            ]
+        }),
+        "lua" => PATTERNS.lua.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*local\s+function\s+(\w+)").unwrap(),
+                    FUNCTION,
+                ),
+                (
+                    regex::Regex::new(r"^\s*function\s+(?:[\w.:]+[.:])?(\w+)\s*\(").unwrap(),
+                    FUNCTION,
+                ),
+            ]
+        }),
+        "zig" => PATTERNS.zig.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?fn\s+(\w+)").unwrap(),
+                    FUNCTION,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*struct").unwrap(),
+                    STRUCT,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*enum").unwrap(),
+                    ENUM,
+                ),
+            ]
+        }),
+        "rb" => PATTERNS.ruby.get_or_init(|| {
+            vec![
+                (regex::Regex::new(r"^\s*class\s+(\w+)").unwrap(), CLASS),
+                (regex::Regex::new(r"^\s*module\s+(\w+)").unwrap(), MODULE),
+                (
+                    regex::Regex::new(r"^\s*def\s+(?:self\.)?(\w+)").unwrap(),
+                    FUNCTION,
+                ),
+            ]
+        }),
+        "cs" => PATTERNS.csharp.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:abstract\s+|sealed\s+|static\s+)?class\s+(\w+)").unwrap(),
+                    CLASS,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+)?interface\s+(\w+)").unwrap(),
+                    INTERFACE,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:static\s+|virtual\s+|override\s+|async\s+)?\w+\s+(\w+)\s*\([^)]*\)\s*\{").unwrap(),
+                    METHOD,
+                ),
+            ]
+        }),
+        "sh" | "bash" => PATTERNS.bash.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*function\s+(\w+)").unwrap(),
+                    FUNCTION,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(\w+)\s*\(\)\s*\{?").unwrap(),
+                    FUNCTION,
+                ),
+            ]
+        }),
+        "css" | "scss" | "less" => PATTERNS.css.get_or_init(|| {
+            vec![
+                (
+                    regex::Regex::new(r"^\s*\.([\w-]+)\s*[,{]").unwrap(),
+                    CLASS,
+                ),
+                (regex::Regex::new(r"^\s*#([\w-]+)\s*[,{]").unwrap(), FIELD),
+            ]
+        }),
+        "json" | "jsonc" => PATTERNS.json.get_or_init(|| {
+            vec![(
+                regex::Regex::new(r#"^\s*"([\w\-.]+)"\s*:"#).unwrap(),
+                KEY,
+            )]
+        }),
+        "html" | "htm" => PATTERNS.html.get_or_init(|| {
+            vec![(
+                regex::Regex::new(r#"\bid\s*=\s*["']([\w-]+)["']"#).unwrap(),
+                FIELD,
+            )]
+        }),
         _ => &[],
     }
 }
@@ -193,7 +319,9 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
 }
 
 const SOURCE_EXTS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "rs", "java", "kt",
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "rs", "java", "kt", "c", "h", "cpp",
+    "cc", "cxx", "hpp", "hh", "hxx", "lua", "zig", "rb", "cs", "sh", "bash", "css", "scss", "less",
+    "json", "jsonc", "html", "htm",
 ];
 
 impl Bm25Index {
@@ -429,6 +557,91 @@ mod tests {
         let found = names(&syms);
         assert!(found.contains(&"UserService"), "{found:?}");
         assert!(found.contains(&"greet"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_cpp_struct_namespace_and_function() {
+        let src = "namespace app {\n\nstruct User {\n    std::string name;\n};\n\nint add(int a, int b) {\n    return a + b;\n}\n\n}\n";
+        let syms = extract_symbols(std::path::Path::new("user.cpp"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"app"), "{found:?}");
+        assert!(found.contains(&"User"), "{found:?}");
+        assert!(found.contains(&"add"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_lua_local_and_global_function() {
+        let src = "local function add(a, b)\n    return a + b\nend\n\nfunction Greeter.greet(self)\n    return \"hi\"\nend\n";
+        let syms = extract_symbols(std::path::Path::new("main.lua"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"add"), "{found:?}");
+        assert!(found.contains(&"greet"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_zig_fn_struct_and_enum() {
+        let src = "pub fn main() void {}\n\nconst User = struct {\n    name: []const u8,\n};\n\nconst Status = enum {\n    active,\n};\n";
+        let syms = extract_symbols(std::path::Path::new("main.zig"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"main"), "{found:?}");
+        assert!(found.contains(&"User"), "{found:?}");
+        assert!(found.contains(&"Status"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_ruby_class_module_and_def() {
+        let src = "module App\n  class Greeter\n    def greet(name)\n      \"hi #{name}\"\n    end\n  end\nend\n";
+        let syms = extract_symbols(std::path::Path::new("greeter.rb"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"App"), "{found:?}");
+        assert!(found.contains(&"Greeter"), "{found:?}");
+        assert!(found.contains(&"greet"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_csharp_class_interface_and_method() {
+        let src = "namespace App;\n\npublic interface IGreeter {}\n\npublic class Greeter : IGreeter {\n    public string Greet() {\n        return \"hi\";\n    }\n}\n";
+        let syms = extract_symbols(std::path::Path::new("Greeter.cs"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"IGreeter"), "{found:?}");
+        assert!(found.contains(&"Greeter"), "{found:?}");
+        assert!(found.contains(&"Greet"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_bash_function() {
+        let src = "function greet() {\n    echo hello\n}\n\nother_task() {\n    echo bye\n}\n";
+        let syms = extract_symbols(std::path::Path::new("main.sh"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"greet"), "{found:?}");
+        assert!(found.contains(&"other_task"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_css_class_and_id_selectors() {
+        let src = ".card {\n  color: red;\n}\n\n#header {\n  color: blue;\n}\n";
+        let syms = extract_symbols(std::path::Path::new("style.css"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"card"), "{found:?}");
+        assert!(found.contains(&"header"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_json_top_level_keys() {
+        let src = "{\n  \"name\": \"lsp-cli\",\n  \"version\": \"0.1.0\"\n}\n";
+        let syms = extract_symbols(std::path::Path::new("package.json"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"name"), "{found:?}");
+        assert!(found.contains(&"version"), "{found:?}");
+    }
+
+    #[test]
+    fn extracts_html_element_ids() {
+        let src = "<div id=\"app\">\n  <span id=\"greeting\">hi</span>\n</div>\n";
+        let syms = extract_symbols(std::path::Path::new("index.html"), src);
+        let found = names(&syms);
+        assert!(found.contains(&"app"), "{found:?}");
+        assert!(found.contains(&"greeting"), "{found:?}");
     }
 
     #[test]

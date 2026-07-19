@@ -13,8 +13,11 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
 - **BM25 search** (`src/bm25.rs`): a from-scratch Okapi BM25 implementation
   (k1=1.5, b=0.75) with camelCase/snake_case tokenization, prefix-match
   scoring for partial identifiers, and its own symbol extractor (regex
-  heuristics per language: TS/JS, Python, Go, Rust, Java/Kotlin) that walks
-  the project tree and indexes classes/functions/methods. This is the
+  heuristics covering every language in [language-support.md](language-support.md):
+  TS/JS/Deno, Python, Go, Rust, Java/Kotlin, C/C++, Lua, Zig, Ruby, C#,
+  Bash, plus lighter-weight extraction for CSS selectors, JSON keys, and
+  HTML element ids) that walks the project tree and indexes
+  classes/functions/methods/selectors/keys. This is the
   fallback path for `search` whenever no LSP server answers
   `workspace/symbol` (in practice, whenever no language server binary is
   installed), so it's the primary functional path for anyone without local
