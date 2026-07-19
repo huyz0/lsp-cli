@@ -13,7 +13,20 @@ The `lsp` binary must be installed. Check with:
 lsp --version
 ```
 
-If missing, build it from source:
+If missing, install it:
+
+```bash
+# Homebrew (macOS/Linux)
+brew install huyz0/tap/lsp-cli
+
+# no package manager
+curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+
+# or download a prebuilt binary directly from
+# https://github.com/huyz0/lsp-cli-rust/releases
+```
+
+Or build it from source:
 
 ```bash
 cargo install --path <path-to-lsp-cli-rust>
