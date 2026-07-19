@@ -22,16 +22,14 @@ correct answers.
 
 ## Installation
 
-**macOS / Linux (Homebrew):**
+Linux and macOS only for now — the background daemon (used by every
+navigation command for warm server reuse, see below) talks over a Unix
+Domain Socket, and there's no Windows named-pipe transport built yet.
+
+**Homebrew:**
 
 ```bash
 brew install huyz0/tap/lsp-cli
-```
-
-**Windows (winget):**
-
-```powershell
-winget install huyz0.lsp-cli
 ```
 
 **No package manager:**

@@ -4,9 +4,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
 #
-# Prefer `brew install huyz0/tap/lsp-cli` on macOS/Linux if you have
-# Homebrew, or winget on Windows — this script is the no-package-manager
-# fallback (mirrors what rustup/eget-style installers do).
+# Prefer `brew install huyz0/tap/lsp-cli` if you have Homebrew — this
+# script is the no-package-manager fallback (mirrors what rustup/eget-style
+# installers do). Linux/macOS only: this tool's background daemon is
+# Unix Domain Socket-only today, so there's no Windows build to fetch.
 set -eu
 
 REPO="huyz0/lsp-cli-rust"

@@ -13,6 +13,12 @@ permissions:
   contents: write
 
 jobs:
+  # Linux + macOS only — Windows is out on purpose, not an oversight: see
+  # the `compile_error!` at the top of src/main.rs. The daemon (used by
+  # every navigation command for warm server reuse) is Unix Domain
+  # Socket-only today; there's no Windows named-pipe transport built yet.
+  # Add a windows-pc-windows-msvc target here (and a winget job below, see
+  # git history for the last one that existed) once that lands.
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -33,9 +39,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             archive_ext: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive_ext: zip
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,15 +75,6 @@ jobs:
           out=lsp-${{ matrix.target }}.tar.gz
           tar -czf "$out" -C "$(dirname "$bin")" "$(basename "$bin")"
           echo "ASSET=$out" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: matrix.archive_ext == 'zip'
-        shell: pwsh
-        run: |
-          $bin = "target/${{ matrix.target }}/release/lsp.exe"
-          $out = "lsp-${{ matrix.target }}.zip"
-          Compress-Archive -Path $bin -DestinationPath $out
-          echo "ASSET=$out" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
@@ -128,15 +122,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_homebrew: ${{ steps.check.outputs.has_homebrew }}
-      has_winget: ${{ steps.check.outputs.has_winget }}
     steps:
       - id: check
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-        run: |
-          echo "has_homebrew=$([ -n "$HOMEBREW_TAP_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_winget=$([ -n "$WINGET_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: echo "has_homebrew=$([ -n "$HOMEBREW_TAP_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
   homebrew:
     name: Update Homebrew formula
@@ -229,22 +219,7 @@ jobs:
               -f content="$CONTENT"
           fi
 
-  winget:
-    name: Update winget manifest
-    needs: [release, check-secrets]
-    runs-on: windows-latest
-    # One-time setup: create a fine-grained PAT with access to submit PRs
-    # against microsoft/winget-pkgs (see
-    # https://github.com/vedantmgoyal9/winget-releaser#token) and add it as
-    # the WINGET_TOKEN repo secret. The very first submission additionally
-    # needs the package to pass Microsoft's manual manifest validation
-    # before winget-pkgs accepts it — that review is outside this repo's
-    # control. Skips quietly until the secret exists.
-    if: needs.check-secrets.outputs.has_winget == 'true'
-    steps:
-      - uses: vedantmgoyal9/winget-releaser@main
-        with:
-          identifier: huyz0.lsp-cli
-          installers-regex: 'x86_64-pc-windows-msvc\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
-          release-tag: ${{ needs.release.outputs.tag }}
+  # No winget job: winget packages need a Windows build, and this project
+  # doesn't compile on Windows yet (see the `build` job's top comment). Add
+  # one back once Windows support exists — vedantmgoyal9/winget-releaser is
+  # the same action rtk-ai/rtk uses for reference.
