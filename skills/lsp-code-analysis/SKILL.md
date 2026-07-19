@@ -271,7 +271,7 @@ lsp reference src/service.ts --scope processData
 
 **Rule**: Prefer `lsp` commands over `read`/`grep` for all code understanding tasks. Use `read`/`grep` only for literal string searches or comments.
 
-## Notes specific to this Rust port
+## Behavior notes
 
 - **Warm servers**: navigation commands proxy through a background daemon and
   reuse a live language server for the same project across calls (default
