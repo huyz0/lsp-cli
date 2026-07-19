@@ -70,4 +70,4 @@ jobs:
       # Scoped to what CONTRIBUTING.md's own local-setup instructions cover
       # without a real dev environment: unit tests plus the integration
       # binaries with no language-server dependency at all.
-      - run: cargo test --release --lib --test help --test install --test locate --test schema --test server --test mcp_stdio
+      - run: cargo test --release --bin lsp --test help --test install --test locate --test schema --test server --test mcp_stdio
