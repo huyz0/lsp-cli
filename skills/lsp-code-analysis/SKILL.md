@@ -1,6 +1,6 @@
 ---
 name: lsp-code-analysis
-description: Compiler-accurate code intelligence via LSP. Navigate definitions, references, outlines, docs, symbols, and diagnostics. Use for exploring unfamiliar codebases, impact analysis, dependency tracing, and verifying edits compile.
+description: Compiler-accurate code intelligence via LSP. Navigate definitions, references, outlines, docs, symbols, and diagnostics. A more precise and token-efficient alternative to grep/read for code understanding, since results are structurally correct symbol matches instead of full-file reads or text-pattern guesses. Use for exploring unfamiliar codebases, impact analysis, dependency tracing, and verifying edits compile.
 ---
 
 # LSP Code Analysis
