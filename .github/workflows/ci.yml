@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Advisory, not a gate: the codebase currently carries a handful of
+      # pre-existing warnings (zombie-process lints in test helpers, an
+      # items-after-test-module style nit) that predate CI and aren't part
+      # of this workflow's scope to fix. `-D warnings` would make every PR
+      # fail on unrelated pre-existing findings; tighten this once those
+      # are cleaned up.
+      - run: cargo clippy --all-targets
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Almost every integration test is gated on a real language server
+      # being installed (see CONTRIBUTING.md) and skips cleanly with a
+      # message when it isn't — none of these runners have any LSP server
+      # installed, so this exercises the ~45 unit tests plus whichever
+      # integration tests need no server at all (help/schema/locate/server
+      # lifecycle/mcp stdio), not full per-language coverage.
+      - run: cargo test --release

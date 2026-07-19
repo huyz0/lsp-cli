@@ -22,10 +22,31 @@ correct answers.
 
 ## Installation
 
-Requires a [Rust toolchain](https://rustup.rs).
+**macOS / Linux (Homebrew):**
 
 ```bash
-git clone <this-repo>
+brew install huyz0/tap/lsp-cli
+```
+
+**Windows (winget):**
+
+```powershell
+winget install huyz0.lsp-cli
+```
+
+**No package manager:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+```
+
+Or grab a prebuilt binary directly from
+[Releases](https://github.com/huyz0/lsp-cli-rust/releases).
+
+**From source** (requires a [Rust toolchain](https://rustup.rs)):
+
+```bash
+git clone https://github.com/huyz0/lsp-cli-rust
 cd lsp-cli-rust
 cargo build --release
 ./target/release/lsp --help
@@ -137,5 +158,6 @@ invocations.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and running tests,
 [docs/architecture.md](docs/architecture.md) for how the codebase is
-organized, and [docs/language-support.md](docs/language-support.md) for
-per-language status detail.
+organized, [docs/language-support.md](docs/language-support.md) for
+per-language status detail, and [docs/RELEASING.md](docs/RELEASING.md) for
+how releases and package-manager publishing work.
