@@ -23,8 +23,9 @@ use crate::locate::resolve_locate;
 use crate::manager_client::ManagerClient;
 use crate::project::{language_id, resolve_project, ProjectContext};
 use crate::protocol::{
-    symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentDiagnosticReport, DocumentSymbol, HoverResult,
-    Location, LocationOrMany, SymbolInformation,
+    symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
+    DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location, LocationOrMany,
+    SymbolInformation,
 };
 use crate::registry;
 
@@ -42,7 +43,12 @@ fn read_file(path: &Path) -> Result<String> {
 /// hand-rolled ~identically in 7 places (one per command), drifting slightly
 /// each time a command was added — `calls`'s version, for instance, built
 /// its `method` field differently from the rest before this was extracted.
-fn print_dry_run(project_root: impl serde::Serialize, language: Option<&str>, method: &str, params: Value) {
+fn print_dry_run(
+    project_root: impl serde::Serialize,
+    language: Option<&str>,
+    method: &str,
+    params: Value,
+) {
     let mut obj = json!({ "dry_run": true, "project_root": project_root, "method": method, "params": params });
     if let Some(lang) = language {
         obj["language"] = json!(lang);
@@ -75,7 +81,13 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
         && client
             .list_servers()
             .await
-            .map(|servers| servers.iter().any(|s| s.project_root == project_root && s.language == ctx.language && s.status == "running"))
+            .map(|servers| {
+                servers.iter().any(|s| {
+                    s.project_root == project_root
+                        && s.language == ctx.language
+                        && s.status == "running"
+                })
+            })
             .unwrap_or(false);
 
     if !already_warm {
@@ -83,7 +95,9 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
     }
 
     client.ensure_running().await?;
-    client.create_server(&ctx.file_path.to_string_lossy()).await?;
+    client
+        .create_server(&ctx.file_path.to_string_lossy())
+        .await?;
     // The daemon (`Manager::proxy_notify`) turns this into a `didChange`
     // instead of a second `didOpen` when the file is already open in this
     // warm server — required, not just an optimization: typescript-language-
@@ -150,11 +164,18 @@ async fn proxy_request_with_retry(
     params: Value,
     is_empty: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
-    let mut result = client.proxy_request(project_root, Some(language), method, params.clone()).await?;
+    let mut result = client
+        .proxy_request(project_root, Some(language), method, params.clone())
+        .await?;
     let mut attempt = 1;
     while is_empty(&result) && attempt <= MAX_EMPTY_RESULT_RETRIES {
-        tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS * attempt as u64)).await;
-        result = client.proxy_request(project_root, Some(language), method, params.clone()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            RETRY_BACKOFF_MS * attempt as u64,
+        ))
+        .await;
+        result = client
+            .proxy_request(project_root, Some(language), method, params.clone())
+            .await?;
         attempt += 1;
     }
     Ok(result)
@@ -168,22 +189,42 @@ fn is_empty_locations_result(v: &Value) -> bool {
 // outline
 // ---------------------------------------------------------------------------
 
-pub async fn run_outline(file: &str, all: bool, project: Option<&str>, dry_run: bool, fmt: &OutputFormat) -> Result<()> {
+pub async fn run_outline(
+    file: &str,
+    all: bool,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), "textDocument/documentSymbol", json!({"textDocument": {"uri": ctx.uri}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": ctx.uri}}),
+        );
         return Ok(());
     }
 
     let client = ensure_daemon_session(&ctx, &content).await?;
     let result = client
-        .proxy_request(&ctx.project_root.to_string_lossy(), Some(&ctx.language), "textDocument/documentSymbol", json!({ "textDocument": { "uri": ctx.uri } }))
+        .proxy_request(
+            &ctx.project_root.to_string_lossy(),
+            Some(&ctx.language),
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": ctx.uri } }),
+        )
         .await?;
 
     let symbols: Vec<DocumentSymbol> = serde_json::from_value(result).unwrap_or_default();
-    let filtered = if all { symbols } else { filter_top_level(symbols) };
+    let filtered = if all {
+        symbols
+    } else {
+        filter_top_level(symbols)
+    };
     println!("{}", fmt.outline(&filtered));
     Ok(())
 }
@@ -192,18 +233,33 @@ pub async fn run_outline(file: &str, all: bool, project: Option<&str>, dry_run: 
 // diagnostics
 // ---------------------------------------------------------------------------
 
-pub async fn run_diagnostics(file: &str, project: Option<&str>, dry_run: bool, fmt: &OutputFormat) -> Result<()> {
+pub async fn run_diagnostics(
+    file: &str,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), "textDocument/diagnostic", json!({"textDocument": {"uri": ctx.uri}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": ctx.uri}}),
+        );
         return Ok(());
     }
 
     let client = ensure_daemon_session(&ctx, &content).await?;
     let result = client
-        .proxy_request(&ctx.project_root.to_string_lossy(), Some(&ctx.language), "textDocument/diagnostic", json!({ "textDocument": { "uri": ctx.uri } }))
+        .proxy_request(
+            &ctx.project_root.to_string_lossy(),
+            Some(&ctx.language),
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": ctx.uri } }),
+        )
         .await
         .map_err(|e| {
             anyhow!(
@@ -223,7 +279,14 @@ pub async fn run_diagnostics(file: &str, project: Option<&str>, dry_run: bool, f
 // calls (call hierarchy)
 // ---------------------------------------------------------------------------
 
-pub async fn run_calls(file: &str, sf: ScopeFind, direction: &str, project: Option<&str>, dry_run: bool, fmt: &OutputFormat) -> Result<()> {
+pub async fn run_calls(
+    file: &str,
+    sf: ScopeFind,
+    direction: &str,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
     if direction != "incoming" && direction != "outgoing" {
         bail!("Unknown direction: {direction} (expected one of: incoming, outgoing)");
     }
@@ -233,7 +296,11 @@ pub async fn run_calls(file: &str, sf: ScopeFind, direction: &str, project: Opti
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
 
     if dry_run {
-        let calls_method = if direction == "incoming" { "callHierarchy/incomingCalls" } else { "callHierarchy/outgoingCalls" };
+        let calls_method = if direction == "incoming" {
+            "callHierarchy/incomingCalls"
+        } else {
+            "callHierarchy/outgoingCalls"
+        };
         print_dry_run(
             &ctx.project_root,
             Some(&ctx.language),
@@ -263,12 +330,28 @@ pub async fn run_calls(file: &str, sf: ScopeFind, direction: &str, project: Opti
     let root_json = serde_json::to_value(&root)?;
 
     let items = if direction == "incoming" {
-        let result = client.proxy_request(&project_root, Some(&ctx.language), "callHierarchy/incomingCalls", json!({ "item": root_json })).await?;
-        let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(result).unwrap_or_default();
+        let result = client
+            .proxy_request(
+                &project_root,
+                Some(&ctx.language),
+                "callHierarchy/incomingCalls",
+                json!({ "item": root_json }),
+            )
+            .await?;
+        let calls: Vec<CallHierarchyIncomingCall> =
+            serde_json::from_value(result).unwrap_or_default();
         calls.into_iter().map(|c| c.from).collect::<Vec<_>>()
     } else {
-        let result = client.proxy_request(&project_root, Some(&ctx.language), "callHierarchy/outgoingCalls", json!({ "item": root_json })).await?;
-        let calls: Vec<CallHierarchyOutgoingCall> = serde_json::from_value(result).unwrap_or_default();
+        let result = client
+            .proxy_request(
+                &project_root,
+                Some(&ctx.language),
+                "callHierarchy/outgoingCalls",
+                json!({ "item": root_json }),
+            )
+            .await?;
+        let calls: Vec<CallHierarchyOutgoingCall> =
+            serde_json::from_value(result).unwrap_or_default();
         calls.into_iter().map(|c| c.to).collect::<Vec<_>>()
     };
 
@@ -277,13 +360,19 @@ pub async fn run_calls(file: &str, sf: ScopeFind, direction: &str, project: Opti
 }
 
 fn filter_top_level(symbols: Vec<DocumentSymbol>) -> Vec<DocumentSymbol> {
-    use crate::protocol::symbol_kind::{CLASS, CONSTRUCTOR, ENUM, FUNCTION, INTERFACE, METHOD, MODULE, NAMESPACE, PROPERTY, STRUCT};
+    use crate::protocol::symbol_kind::{
+        CLASS, CONSTRUCTOR, ENUM, FUNCTION, INTERFACE, METHOD, MODULE, NAMESPACE, PROPERTY, STRUCT,
+    };
     const TOP: &[u32] = &[CLASS, INTERFACE, ENUM, FUNCTION, MODULE, NAMESPACE, STRUCT];
     symbols
         .into_iter()
         .filter(|s| TOP.contains(&s.kind))
         .map(|mut s| {
-            s.children = s.children.map(|c| c.into_iter().filter(|c| matches!(c.kind, METHOD | CONSTRUCTOR | PROPERTY)).collect());
+            s.children = s.children.map(|c| {
+                c.into_iter()
+                    .filter(|c| matches!(c.kind, METHOD | CONSTRUCTOR | PROPERTY))
+                    .collect()
+            });
             s
         })
         .collect()
@@ -308,11 +397,18 @@ pub async fn run_definition(
         "definition" => "textDocument/definition",
         "declaration" => "textDocument/declaration",
         "type_definition" => "textDocument/typeDefinition",
-        other => bail!("Unknown mode: {other} (expected one of: definition, declaration, type_definition)"),
+        other => bail!(
+            "Unknown mode: {other} (expected one of: definition, declaration, type_definition)"
+        ),
     };
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), method, json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            method,
+            json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}),
+        );
         return Ok(());
     }
 
@@ -361,7 +457,12 @@ pub async fn run_reference(
     };
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), method, json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            method,
+            json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}),
+        );
         return Ok(());
     }
 
@@ -381,12 +482,19 @@ pub async fn run_reference(
 
     let all_locations: Vec<Location> = serde_json::from_value(result).unwrap_or_default();
     let end = (start_index + max_items).min(all_locations.len());
-    let page = if start_index < all_locations.len() { &all_locations[start_index..end] } else { &[] };
+    let page = if start_index < all_locations.len() {
+        &all_locations[start_index..end]
+    } else {
+        &[]
+    };
     println!("{}", fmt.reference(page));
 
     let remaining = all_locations.len().saturating_sub(start_index + page.len());
     if remaining > 0 {
-        eprintln!("\n[{remaining} more results — use --start-index {} to continue]", start_index + max_items);
+        eprintln!(
+            "\n[{remaining} more results — use --start-index {} to continue]",
+            start_index + max_items
+        );
     }
     Ok(())
 }
@@ -395,13 +503,24 @@ pub async fn run_reference(
 // doc
 // ---------------------------------------------------------------------------
 
-pub async fn run_doc(file: &str, sf: ScopeFind, project: Option<&str>, dry_run: bool, fmt: &OutputFormat) -> Result<()> {
+pub async fn run_doc(
+    file: &str,
+    sf: ScopeFind,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), "textDocument/hover", json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            "textDocument/hover",
+            json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}),
+        );
         return Ok(());
     }
 
@@ -417,7 +536,10 @@ pub async fn run_doc(file: &str, sf: ScopeFind, project: Option<&str>, dry_run: 
     .await?;
 
     if result.is_null() {
-        println!("{}", fmt.error("No documentation available for this symbol."));
+        println!(
+            "{}",
+            fmt.error("No documentation available for this symbol.")
+        );
         return Ok(());
     }
     let hover: HoverResult = serde_json::from_value(result)?;
@@ -429,19 +551,35 @@ pub async fn run_doc(file: &str, sf: ScopeFind, project: Option<&str>, dry_run: 
 // symbol
 // ---------------------------------------------------------------------------
 
-pub async fn run_symbol(file: &str, sf: ScopeFind, project: Option<&str>, dry_run: bool, fmt: &OutputFormat) -> Result<()> {
+pub async fn run_symbol(
+    file: &str,
+    sf: ScopeFind,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
 
     if dry_run {
-        print_dry_run(&ctx.project_root, Some(&ctx.language), "textDocument/documentSymbol", json!({"textDocument": {"uri": ctx.uri}}));
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": ctx.uri}}),
+        );
         return Ok(());
     }
 
     let client = ensure_daemon_session(&ctx, &content).await?;
     let result = client
-        .proxy_request(&ctx.project_root.to_string_lossy(), Some(&ctx.language), "textDocument/documentSymbol", json!({ "textDocument": { "uri": ctx.uri } }))
+        .proxy_request(
+            &ctx.project_root.to_string_lossy(),
+            Some(&ctx.language),
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": ctx.uri } }),
+        )
         .await?;
 
     let symbols: Vec<DocumentSymbol> = serde_json::from_value(result).unwrap_or_default();
@@ -449,7 +587,10 @@ pub async fn run_symbol(file: &str, sf: ScopeFind, project: Option<&str>, dry_ru
 
     let target = find_deepest_containing(&symbols, pos.line);
     let Some(target) = target else {
-        eprintln!("{}", fmt.error(&format!("No symbol found at line {}", pos.line + 1)));
+        eprintln!(
+            "{}",
+            fmt.error(&format!("No symbol found at line {}", pos.line + 1))
+        );
         std::process::exit(1);
     };
 
@@ -481,7 +622,9 @@ fn find_deepest_containing(symbols: &[DocumentSymbol], line: u32) -> Option<Docu
 // ---------------------------------------------------------------------------
 
 pub fn run_locate(file: &str, sf: ScopeFind, fmt: &OutputFormat) -> Result<()> {
-    let abs = Path::new(file).canonicalize().map_err(|_| anyhow!("File not found: {file}"))?;
+    let abs = Path::new(file)
+        .canonicalize()
+        .map_err(|_| anyhow!("File not found: {file}"))?;
     let content = read_file(&abs)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
     let lines: Vec<&str> = content.split('\n').collect();
@@ -497,7 +640,11 @@ pub fn run_locate(file: &str, sf: ScopeFind, fmt: &OutputFormat) -> Result<()> {
             println!("Resolved: {}:{}:{}\n", abs.display(), line_num, char_num);
             for (i, line) in context_lines.iter().enumerate() {
                 let n = ctx_start + i + 1;
-                let marker = if n as u32 == line_num { "\u{2192}" } else { " " };
+                let marker = if n as u32 == line_num {
+                    "\u{2192}"
+                } else {
+                    " "
+                };
                 println!("{marker} {:>4} \u{2502} {line}", n);
             }
         }
@@ -544,7 +691,12 @@ pub async fn run_search(
     };
 
     if dry_run {
-        print_dry_run(&project_root, None, "workspace/symbol", json!({"query": query}));
+        print_dry_run(
+            &project_root,
+            None,
+            "workspace/symbol",
+            json!({"query": query}),
+        );
         return Ok(());
     }
 
@@ -553,22 +705,33 @@ pub async fn run_search(
     // (or on any failure — including "no server installed", which this path
     // does not attempt to auto-install, matching the TS original's search.ts)
     // fall back to the self-built BM25 index.
-    let mut results: Vec<SymbolInformation> = try_lsp_search(&project_root, query).await.unwrap_or_default();
+    let mut results: Vec<SymbolInformation> = try_lsp_search(&project_root, query)
+        .await
+        .unwrap_or_default();
 
     if results.is_empty() {
         let index = Bm25Index::build(&project_root);
-        results = index.search(query).into_iter().map(|(_, s)| s.clone()).collect();
+        results = index
+            .search(query)
+            .into_iter()
+            .map(|(_, s)| s.clone())
+            .collect();
     }
 
     if let Some(kinds) = kinds {
-        let kind_ids: std::collections::HashSet<u32> =
-            (1u32..=26).filter(|k| kinds.iter().any(|name| symbol_kind_name(*k) == name)).collect();
+        let kind_ids: std::collections::HashSet<u32> = (1u32..=26)
+            .filter(|k| kinds.iter().any(|name| symbol_kind_name(*k) == name))
+            .collect();
         results.retain(|s| kind_ids.contains(&s.kind));
     }
 
     let total = results.len();
     let end = (start_index + max_items).min(total);
-    let page = if start_index < total { &results[start_index..end] } else { &[] };
+    let page = if start_index < total {
+        &results[start_index..end]
+    } else {
+        &[]
+    };
 
     match fmt {
         OutputFormat::Markdown => {
@@ -576,7 +739,11 @@ pub async fn run_search(
                 println!("No matches found.");
             } else {
                 for (i, sym) in page.iter().enumerate() {
-                    let file_path = sym.location.uri.strip_prefix("file://").unwrap_or(&sym.location.uri);
+                    let file_path = sym
+                        .location
+                        .uri
+                        .strip_prefix("file://")
+                        .unwrap_or(&sym.location.uri);
                     println!(
                         "{}. [{}] {}  {}:{}",
                         i + start_index + 1,
@@ -589,7 +756,10 @@ pub async fn run_search(
             }
             let remaining = total.saturating_sub(start_index + page.len());
             if remaining > 0 {
-                println!("\n[{remaining} more — use --start-index {} ]", start_index + max_items);
+                println!(
+                    "\n[{remaining} more — use --start-index {} ]",
+                    start_index + max_items
+                );
             }
         }
         OutputFormat::Json => {
@@ -605,7 +775,10 @@ pub async fn run_search(
                     })
                 })
                 .collect();
-            println!("{}", json!({ "kind": "search", "query": query, "items": items, "total": total, "startIndex": start_index }));
+            println!(
+                "{}",
+                json!({ "kind": "search", "query": query, "items": items, "total": total, "startIndex": start_index })
+            );
         }
     }
 
@@ -626,8 +799,17 @@ async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInf
 
     let client = ManagerClient::new();
     client.ensure_running().await?;
-    client.create_server(&entry.path().to_string_lossy()).await?;
-    let result = client.proxy_request(project_root, Some(language), "workspace/symbol", json!({ "query": query })).await?;
+    client
+        .create_server(&entry.path().to_string_lossy())
+        .await?;
+    let result = client
+        .proxy_request(
+            project_root,
+            Some(language),
+            "workspace/symbol",
+            json!({ "query": query }),
+        )
+        .await?;
     Ok(serde_json::from_value(result).unwrap_or_default())
 }
 
@@ -644,7 +826,10 @@ pub fn run_schema(command: Option<&str>) -> Result<()> {
         None => println!("{}", serde_json::to_string_pretty(&schemas)?),
         Some(name) => match schemas.get(name) {
             Some(s) => println!("{}", serde_json::to_string_pretty(s)?),
-            None => bail!("Unknown command '{name}'. Available: {}", schemas.keys().cloned().collect::<Vec<_>>().join(", ")),
+            None => bail!(
+                "Unknown command '{name}'. Available: {}",
+                schemas.keys().cloned().collect::<Vec<_>>().join(", ")
+            ),
         },
     }
     Ok(())

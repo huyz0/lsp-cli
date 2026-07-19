@@ -43,7 +43,11 @@ fn server_stop_all_when_no_servers_running_exits_cleanly() {
 fn server_pid(project: &str) -> Option<u64> {
     let result = lsp(&["server", "list", "--output", "json"]);
     let data: serde_json::Value = serde_json::from_str(&result.stdout).ok()?;
-    data["servers"].as_array()?.iter().find(|s| s["project_root"] == project)?["pid"].as_u64()
+    data["servers"]
+        .as_array()?
+        .iter()
+        .find(|s| s["project_root"] == project)?["pid"]
+        .as_u64()
 }
 
 /// Covers the "kill and reload" daemon bugs found during review:
@@ -73,8 +77,13 @@ fn kill_and_reload_respawns_a_dead_server() {
 
     // Simulate an external crash/OOM-kill of the underlying LSP process —
     // not something the daemon itself did.
-    let kill = std::process::Command::new("kill").args(["-9", &pid1.to_string()]).status();
-    assert!(kill.map(|s| s.success()).unwrap_or(false), "failed to kill pid {pid1}");
+    let kill = std::process::Command::new("kill")
+        .args(["-9", &pid1.to_string()])
+        .status();
+    assert!(
+        kill.map(|s| s.success()).unwrap_or(false),
+        "failed to kill pid {pid1}"
+    );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let start2 = lsp(&["server", "start", file.to_str().unwrap()]);
@@ -107,15 +116,32 @@ fn reusing_a_running_server_refreshes_idle_since() {
     lsp(&["server", "start", file.to_str().unwrap()]);
     let idle1 = lsp(&["server", "list", "--output", "json"]);
     let data1: serde_json::Value = serde_json::from_str(&idle1.stdout).unwrap();
-    let t1 = data1["servers"].as_array().unwrap().iter().find(|s| s["project_root"] == project_str).unwrap()["idle_since"].as_i64().unwrap();
+    let t1 = data1["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["project_root"] == project_str)
+        .unwrap()["idle_since"]
+        .as_i64()
+        .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(1200));
     lsp(&["server", "start", file.to_str().unwrap()]);
     let idle2 = lsp(&["server", "list", "--output", "json"]);
     let data2: serde_json::Value = serde_json::from_str(&idle2.stdout).unwrap();
-    let t2 = data2["servers"].as_array().unwrap().iter().find(|s| s["project_root"] == project_str).unwrap()["idle_since"].as_i64().unwrap();
+    let t2 = data2["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["project_root"] == project_str)
+        .unwrap()["idle_since"]
+        .as_i64()
+        .unwrap();
 
-    assert!(t2 > t1, "idle_since should advance when an existing server is reused (t1={t1}, t2={t2})");
+    assert!(
+        t2 > t1,
+        "idle_since should advance when an existing server is reused (t1={t1}, t2={t2})"
+    );
 
     let _ = lsp(&["server", "shutdown"]);
 }
@@ -153,7 +179,12 @@ fn concurrent_server_start_for_the_same_project_creates_only_one_entry() {
 
     let list = lsp(&["server", "list", "--output", "json"]);
     let data: serde_json::Value = serde_json::from_str(&list.stdout).unwrap();
-    let matching = data["servers"].as_array().unwrap().iter().filter(|s| s["project_root"] == project_str).count();
+    let matching = data["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["project_root"] == project_str)
+        .count();
     assert_eq!(matching, 1, "expected exactly one tracked entry for the project after concurrent starts, got {matching}");
 
     let _ = lsp(&["server", "shutdown"]);

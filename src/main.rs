@@ -36,7 +36,11 @@ use commands::ScopeFind;
 use format::OutputFormat;
 
 #[derive(Parser)]
-#[command(name = "lsp", version = "0.1.0", about = "LSP-backed code navigation CLI")]
+#[command(
+    name = "lsp",
+    version = "0.1.0",
+    about = "LSP-backed code navigation CLI"
+)]
 struct Cli {
     /// Internal flag: run as the background manager daemon.
     #[arg(long, hide = true)]
@@ -55,7 +59,8 @@ const SCOPE_HELP: &str = "Location within the file: a line number (`42`), a line
 const FIND_HELP: &str = "Text pattern to locate within --scope's range, whitespace-insensitive. Mark the exact cursor position with <|>, e.g. --find \"<|>createUser\" or --find \"return <|>result\". If omitted, the position defaults to the start of --scope.";
 const OUTPUT_HELP: &str = "Output format: `json` (default, for agents) or `markdown` (for humans).";
 const PROJECT_HELP: &str = "Override the auto-detected project root (normally found by walking up from <file> to the nearest package.json/Cargo.toml/go.mod/etc).";
-const DRY_RUN_HELP: &str = "Print the LSP request that would be sent, without contacting a language server.";
+const DRY_RUN_HELP: &str =
+    "Print the LSP request that would be sent, without contacting a language server.";
 
 #[derive(Subcommand)]
 enum Commands {
@@ -337,15 +342,21 @@ fn inject_json_args(mut argv: Vec<String>) -> Vec<String> {
     if argv.iter().any(|a| a == "mcp") || argv.iter().any(|a| a == "--daemon") {
         return argv;
     }
-    let Some(idx) = argv.iter().position(|a| a == "--json") else { return argv };
+    let Some(idx) = argv.iter().position(|a| a == "--json") else {
+        return argv;
+    };
     if idx + 1 >= argv.len() {
         return argv;
     }
     let payload = argv[idx + 1].clone();
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else { return argv };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
+        return argv;
+    };
     argv.drain(idx..=idx + 1);
 
-    let Some(obj) = v.as_object() else { return argv };
+    let Some(obj) = v.as_object() else {
+        return argv;
+    };
     let positional_keys = ["command", "subcommand", "file", "query", "language", "path"];
     for key in positional_keys {
         if let Some(val) = obj.get(key).and_then(|v| v.as_str()) {
@@ -362,7 +373,11 @@ fn inject_json_args(mut argv: Vec<String>) -> Vec<String> {
             serde_json::Value::Array(items) => {
                 for item in items {
                     argv.push(format!("--{k}"));
-                    argv.push(item.as_str().map(|s| s.to_string()).unwrap_or_else(|| item.to_string()));
+                    argv.push(
+                        item.as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| item.to_string()),
+                    );
                 }
             }
             serde_json::Value::String(s) => {
@@ -407,49 +422,194 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     match cmd {
-        Commands::Outline { file, all, scope: _, find: _, project, output, dry_run } => {
-            commands::run_outline(&file, all, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Outline {
+            file,
+            all,
+            scope: _,
+            find: _,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_outline(&file, all, project.as_deref(), dry_run, &fmt_of(&output)?)
+                .await?;
         }
-        Commands::Definition { file, mode, scope, find, project, output, dry_run } => {
-            commands::run_definition(&file, ScopeFind { scope, find }, &mode, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Definition {
+            file,
+            mode,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_definition(
+                &file,
+                ScopeFind { scope, find },
+                &mode,
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Reference { file, mode, scope, find, project, output, dry_run, max_items, start_index, pagination_id: _ } => {
-            commands::run_reference(&file, ScopeFind { scope, find }, &mode, project.as_deref(), dry_run, max_items, start_index, &fmt_of(&output)?).await?;
+        Commands::Reference {
+            file,
+            mode,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+            max_items,
+            start_index,
+            pagination_id: _,
+        } => {
+            commands::run_reference(
+                &file,
+                ScopeFind { scope, find },
+                &mode,
+                project.as_deref(),
+                dry_run,
+                max_items,
+                start_index,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Doc { file, scope, find, project, output, dry_run } => {
-            commands::run_doc(&file, ScopeFind { scope, find }, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Doc {
+            file,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_doc(
+                &file,
+                ScopeFind { scope, find },
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Diagnostics { file, project, output, dry_run } => {
-            commands::run_diagnostics(&file, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Diagnostics {
+            file,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_diagnostics(&file, project.as_deref(), dry_run, &fmt_of(&output)?)
+                .await?;
         }
-        Commands::Calls { file, direction, scope, find, project, output, dry_run } => {
-            commands::run_calls(&file, ScopeFind { scope, find }, &direction, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Calls {
+            file,
+            direction,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_calls(
+                &file,
+                ScopeFind { scope, find },
+                &direction,
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Symbol { file, scope, find, project, output, dry_run } => {
-            commands::run_symbol(&file, ScopeFind { scope, find }, project.as_deref(), dry_run, &fmt_of(&output)?).await?;
+        Commands::Symbol {
+            file,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_symbol(
+                &file,
+                ScopeFind { scope, find },
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Locate { file, scope, find, output } => {
+        Commands::Locate {
+            file,
+            scope,
+            find,
+            output,
+        } => {
             commands::run_locate(&file, ScopeFind { scope, find }, &fmt_of(&output)?)?;
         }
-        Commands::Search { query, kinds, project, output, dry_run, max_items, start_index, pagination_id: _ } => {
+        Commands::Search {
+            query,
+            kinds,
+            project,
+            output,
+            dry_run,
+            max_items,
+            start_index,
+            pagination_id: _,
+        } => {
             let kinds = if kinds.is_empty() { None } else { Some(kinds) };
-            commands::run_search(&query, kinds, project.as_deref(), dry_run, max_items, start_index, &fmt_of(&output)?).await?;
+            commands::run_search(
+                &query,
+                kinds,
+                project.as_deref(),
+                dry_run,
+                max_items,
+                start_index,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
-        Commands::Install { language, all, list, update } => {
+        Commands::Install {
+            language,
+            all,
+            list,
+            update,
+        } => {
             if list || (language.is_none() && !all) {
                 install::run_install_list()?;
             } else {
-                install::run_install(if all { "all" } else { language.as_deref().unwrap_or("") }, update).await?;
+                install::run_install(
+                    if all {
+                        "all"
+                    } else {
+                        language.as_deref().unwrap_or("")
+                    },
+                    update,
+                )
+                .await?;
             }
         }
-        Commands::Server { subcommand, path, all, output } => {
-            run_server(subcommand.as_deref().unwrap_or("list"), path.as_deref(), all, &fmt_of(&output)?).await?;
+        Commands::Server {
+            subcommand,
+            path,
+            all,
+            output,
+        } => {
+            run_server(
+                subcommand.as_deref().unwrap_or("list"),
+                path.as_deref(),
+                all,
+                &fmt_of(&output)?,
+            )
+            .await?;
         }
         Commands::Mcp { transport, project } => {
             if transport == "stdio" {
                 mcp::run_mcp_stdio(project.as_deref())?;
             } else {
-                anyhow::bail!("Only the stdio MCP transport is implemented in this Rust port (see README).");
+                anyhow::bail!(
+                    "Only the stdio MCP transport is implemented in this Rust port (see README)."
+                );
             }
         }
         Commands::Schema { command } => {
@@ -466,7 +626,10 @@ async fn run_server(sub: &str, path: Option<&str>, all: bool, fmt: &OutputFormat
             client.ensure_running().await?;
             let servers = client.list_servers().await?;
             match fmt {
-                OutputFormat::Json => println!("{}", serde_json::json!({ "kind": "serverList", "servers": servers })),
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({ "kind": "serverList", "servers": servers })
+                ),
                 OutputFormat::Markdown => {
                     if servers.is_empty() {
                         println!("No servers running.");

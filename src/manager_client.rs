@@ -15,7 +15,10 @@ use crate::daemon::{socket_path, ManagedServerInfo};
 pub struct ManagerClient;
 
 fn spawn_lock_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lsp-cli").join("manager.spawn.lock")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lsp-cli")
+        .join("manager.spawn.lock")
 }
 
 /// A lock file older than this is assumed to belong to a spawner that
@@ -27,7 +30,12 @@ const SPAWN_LOCK_STALE_AFTER: Duration = Duration::from_secs(15);
 fn spawn_lock_is_stale(path: &Path) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .map(|mtime| mtime.elapsed().map(|age| age > SPAWN_LOCK_STALE_AFTER).unwrap_or(true))
+        .map(|mtime| {
+            mtime
+                .elapsed()
+                .map(|age| age > SPAWN_LOCK_STALE_AFTER)
+                .unwrap_or(true)
+        })
         .unwrap_or(true) // can't stat it (e.g. already gone) — safe to treat as not blocking
 }
 
@@ -68,7 +76,11 @@ impl ManagerClient {
         }
 
         let acquired = loop {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
                 Ok(mut f) => {
                     use std::io::Write;
                     let _ = write!(f, "{}", std::process::id());
@@ -83,7 +95,10 @@ impl ManagerClient {
                     }
                     break false;
                 }
-                Err(e) => bail!("failed to create daemon spawn lock {}: {e}", lock_path.display()),
+                Err(e) => bail!(
+                    "failed to create daemon spawn lock {}: {e}",
+                    lock_path.display()
+                ),
             }
         };
 
@@ -142,7 +157,11 @@ impl ManagerClient {
         Ok(serde_json::from_str(&resp)?)
     }
 
-    pub async fn delete_servers(&self, path: Option<&str>, all: bool) -> Result<Vec<ManagedServerInfo>> {
+    pub async fn delete_servers(
+        &self,
+        path: Option<&str>,
+        all: bool,
+    ) -> Result<Vec<ManagedServerInfo>> {
         let body = serde_json::json!({ "path": path, "all": all }).to_string();
         let (_, resp) = raw_request("DELETE", "/delete", Some(body)).await?;
         Ok(serde_json::from_str(&resp)?)
@@ -151,7 +170,13 @@ impl ManagerClient {
     /// Sends an LSP request to the warm, daemon-managed server for
     /// `project_root` and returns its result — used by the navigation
     /// commands instead of spawning their own one-shot `LspClient`.
-    pub async fn proxy_request(&self, project_root: &str, language: Option<&str>, method: &str, params: Value) -> Result<Value> {
+    pub async fn proxy_request(
+        &self,
+        project_root: &str,
+        language: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
         let body = serde_json::json!({ "project_root": project_root, "language": language, "method": method, "params": params }).to_string();
         let (status, resp) = raw_request("POST", "/request", Some(body)).await?;
         if status != 200 {
@@ -161,7 +186,13 @@ impl ManagerClient {
     }
 
     /// Same as `proxy_request` but for a notification with no result.
-    pub async fn proxy_notify(&self, project_root: &str, language: Option<&str>, method: &str, params: Value) -> Result<()> {
+    pub async fn proxy_notify(
+        &self,
+        project_root: &str,
+        language: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<()> {
         let body = serde_json::json!({ "project_root": project_root, "language": language, "method": method, "params": params }).to_string();
         let (status, resp) = raw_request("POST", "/notify", Some(body)).await?;
         if status != 204 {
@@ -203,7 +234,10 @@ async fn raw_request(method: &str, path: &str, body: Option<String>) -> Result<(
             Ok(v) => return Ok(v),
             Err(e) if attempt < MAX_TRANSPORT_RETRIES => {
                 attempt += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(TRANSPORT_RETRY_BACKOFF_MS * attempt as u64)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    TRANSPORT_RETRY_BACKOFF_MS * attempt as u64,
+                ))
+                .await;
                 let _ = e; // transient — retried below
             }
             Err(e) => return Err(e),
@@ -213,7 +247,9 @@ async fn raw_request(method: &str, path: &str, body: Option<String>) -> Result<(
 
 async fn raw_request_once(method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
     let sock = socket_path();
-    let mut stream = UnixStream::connect(&sock).await.map_err(|e| anyhow!("cannot reach manager daemon: {e}"))?;
+    let mut stream = UnixStream::connect(&sock)
+        .await
+        .map_err(|e| anyhow!("cannot reach manager daemon: {e}"))?;
 
     let body = body.unwrap_or_default();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");

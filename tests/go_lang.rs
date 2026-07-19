@@ -10,7 +10,12 @@ fn outline_returns_struct_and_methods() {
     let models = go_fixture("models.go");
     let data = lsp_json(&["outline", models.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }
 
@@ -21,7 +26,14 @@ fn definition_follows_cross_file_reference() {
         return;
     }
     let service = go_fixture("service.go");
-    let data = lsp_json(&["definition", service.to_str().unwrap(), "--scope", "CreateUser", "--find", "return <|>User"]);
+    let data = lsp_json(&[
+        "definition",
+        service.to_str().unwrap(),
+        "--scope",
+        "CreateUser",
+        "--find",
+        "return <|>User",
+    ]);
     assert_eq!(data["kind"], "definition");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());

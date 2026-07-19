@@ -55,10 +55,17 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
     let _ = daemon.wait();
     let _ = lsp(&["server", "shutdown"]);
 
-    assert!(found, "expected a `[watcher] ... change(s) detected` line on the daemon's stderr within 5s");
+    assert!(
+        found,
+        "expected a `[watcher] ... change(s) detected` line on the daemon's stderr within 5s"
+    );
 }
 
-fn read_stderr_until(mut reader: BufReader<ChildStderr>, needle: &str, timeout: std::time::Duration) -> bool {
+fn read_stderr_until(
+    mut reader: BufReader<ChildStderr>,
+    needle: &str,
+    timeout: std::time::Duration,
+) -> bool {
     // BufRead::read_line blocks, so run the read loop on its own thread
     // (BufReader<ChildStderr> is Send) and race it against the timeout
     // instead of blocking the test forever if the watcher never fires.

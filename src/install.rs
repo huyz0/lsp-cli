@@ -30,8 +30,23 @@ fn go_dir() -> PathBuf {
 }
 
 /// Managed languages, in the same order `lsp install list` should show them.
-pub const MANAGED_LANGUAGES: &[&str] =
-    &["typescript", "python", "go", "rust", "java", "kotlin", "html", "css", "json", "cpp", "lua", "zig", "csharp", "ruby", "bash"];
+pub const MANAGED_LANGUAGES: &[&str] = &[
+    "typescript",
+    "python",
+    "go",
+    "rust",
+    "java",
+    "kotlin",
+    "html",
+    "css",
+    "json",
+    "cpp",
+    "lua",
+    "zig",
+    "csharp",
+    "ruby",
+    "bash",
+];
 
 fn is_managed(language: &str) -> bool {
     MANAGED_LANGUAGES.contains(&language)
@@ -52,10 +67,18 @@ fn write_node_wrapper(wrapper_path: &Path, entry: &Path) -> Result<()> {
 fn npm_install(packages: &[&str]) -> Result<()> {
     let dir = packages_dir();
     std::fs::create_dir_all(&dir)?;
-    let status = Command::new("npm").arg("install").args(packages).current_dir(&dir).status();
+    let status = Command::new("npm")
+        .arg("install")
+        .args(packages)
+        .current_dir(&dir)
+        .status();
     match status {
         Ok(s) if s.success() => Ok(()),
-        Ok(s) => bail!("npm install {} failed with exit code {:?}", packages.join(" "), s.code()),
+        Ok(s) => bail!(
+            "npm install {} failed with exit code {:?}",
+            packages.join(" "),
+            s.code()
+        ),
         Err(e) => bail!("failed to run npm (is it installed and on PATH?): {e}"),
     }
 }
@@ -65,7 +88,12 @@ fn run_binary_version(bin: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or_default().trim().to_string();
+    let text = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if text.is_empty() {
         None
     } else {
@@ -142,12 +170,19 @@ fn npm_spec(language: &str) -> Option<NpmSpec> {
 fn install_npm(spec: &NpmSpec) -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Installing {} (npm install {})...", spec.wrapper_name, spec.packages.join(" "));
+    println!(
+        "Installing {} (npm install {})...",
+        spec.wrapper_name,
+        spec.packages.join(" ")
+    );
     npm_install(spec.packages)?;
 
     let entry = packages_dir().join(spec.entry_rel);
     if !entry.exists() {
-        bail!("npm install succeeded but expected entry point is missing: {}", entry.display());
+        bail!(
+            "npm install succeeded but expected entry point is missing: {}",
+            entry.display()
+        );
     }
     let wrapper = install_dir.join(spec.wrapper_name);
     write_node_wrapper(&wrapper, &entry)?;
@@ -165,7 +200,10 @@ fn check_npm_version(spec: &NpmSpec) -> Option<String> {
         return None;
     }
 
-    let version_entry = spec.version_entry_rel.map(|rel| packages_dir().join(rel)).unwrap_or_else(|| entry.clone());
+    let version_entry = spec
+        .version_entry_rel
+        .map(|rel| packages_dir().join(rel))
+        .unwrap_or_else(|| entry.clone());
     if let Some(text) = version_entry
         .to_str()
         .filter(|_| version_entry.exists())
@@ -203,7 +241,10 @@ fn install_go() -> Result<PathBuf> {
 
     let src = gopath.join("bin").join("gopls");
     if !src.exists() {
-        bail!("go install succeeded but gopls binary is missing at {}", src.display());
+        bail!(
+            "go install succeeded but gopls binary is missing at {}",
+            src.display()
+        );
     }
     let dest = install_dir.join("gopls");
     if dest.exists() || dest.symlink_metadata().is_ok() {
@@ -273,7 +314,10 @@ async fn fetch_latest_release(repo: &str) -> Result<GithubRelease> {
         .await
         .map_err(|e| anyhow!("failed to reach GitHub API ({url}): {e}"))?;
     if !resp.status().is_success() {
-        bail!("Failed to fetch latest release for {repo}: HTTP {}", resp.status());
+        bail!(
+            "Failed to fetch latest release for {repo}: HTTP {}",
+            resp.status()
+        );
     }
     Ok(resp.json().await?)
 }
@@ -286,15 +330,23 @@ async fn fetch_latest_release(repo: &str) -> Result<GithubRelease> {
 /// (rather than hardening just the filename) also means the temp gunzip/
 /// unzip inputs and outputs can't collide with any other concurrent install.
 fn unique_temp_dir() -> Result<PathBuf> {
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("lsp-cli-install-{}-{nonce}", std::process::id()));
-    std::fs::create_dir(&dir).map_err(|e| anyhow!("failed to create temp install dir {}: {e}", dir.display()))?;
+    std::fs::create_dir(&dir)
+        .map_err(|e| anyhow!("failed to create temp install dir {}: {e}", dir.display()))?;
     Ok(dir)
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
-    let resp = client.get(url).header("User-Agent", "lsp-cli").send().await?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", "lsp-cli")
+        .send()
+        .await?;
     if !resp.status().is_success() {
         bail!("Download failed: HTTP {} for {url}", resp.status());
     }
@@ -310,7 +362,11 @@ async fn install_rust_analyzer() -> Result<PathBuf> {
     let filename = format!("rust-analyzer-{target}{ext}");
 
     let release = fetch_latest_release("rust-lang/rust-analyzer").await?;
-    let asset = release.assets.iter().find(|a| a.name == filename).ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == filename)
+        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
@@ -318,7 +374,11 @@ async fn install_rust_analyzer() -> Result<PathBuf> {
     let temp_path = temp_dir.join(&filename);
     std::fs::write(&temp_path, &bytes)?;
 
-    let dest_name = if std::env::consts::OS == "windows" { "rust-analyzer.exe" } else { "rust-analyzer" };
+    let dest_name = if std::env::consts::OS == "windows" {
+        "rust-analyzer.exe"
+    } else {
+        "rust-analyzer"
+    };
     let dest = install_dir.join(dest_name);
 
     if ext == ".gz" {
@@ -346,7 +406,11 @@ async fn install_rust_analyzer() -> Result<PathBuf> {
 }
 
 fn check_rust_analyzer_version() -> Option<String> {
-    let dest_name = if std::env::consts::OS == "windows" { "rust-analyzer.exe" } else { "rust-analyzer" };
+    let dest_name = if std::env::consts::OS == "windows" {
+        "rust-analyzer.exe"
+    } else {
+        "rust-analyzer"
+    };
     let bin = default_install_dir().join(dest_name);
     if !bin.exists() {
         return None;
@@ -377,7 +441,13 @@ fn jdtls_install_dir() -> PathBuf {
 /// installed and `sdk use`/`sdk default` is how they pick one), then
 /// `JAVA_HOME`, then whatever `java` resolves to on `PATH`.
 fn find_java() -> Option<PathBuf> {
-    let sdkman_java = home().join(".sdkman").join("candidates").join("java").join("current").join("bin").join("java");
+    let sdkman_java = home()
+        .join(".sdkman")
+        .join("candidates")
+        .join("java")
+        .join("current")
+        .join("bin")
+        .join("java");
     if sdkman_java.exists() {
         return Some(sdkman_java);
     }
@@ -387,7 +457,11 @@ fn find_java() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    let on_path = Command::new("java").arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
+    let on_path = Command::new("java")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     on_path.then(|| PathBuf::from("java"))
 }
 
@@ -400,15 +474,24 @@ fn jdtls_config_dir_name() -> &'static str {
 }
 
 fn find_launcher_jar(jdtls_dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(jdtls_dir.join("plugins")).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("org.eclipse.equinox.launcher_") && n.ends_with(".jar"))
-            .unwrap_or(false)
-    })
+    std::fs::read_dir(jdtls_dir.join("plugins"))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("org.eclipse.equinox.launcher_") && n.ends_with(".jar"))
+                .unwrap_or(false)
+        })
 }
 
-fn write_jdtls_wrapper(wrapper_path: &Path, java: &Path, launcher: &Path, config_dir: &Path) -> Result<()> {
+fn write_jdtls_wrapper(
+    wrapper_path: &Path,
+    java: &Path,
+    launcher: &Path,
+    config_dir: &Path,
+) -> Result<()> {
     let script = format!(
         "#!/bin/sh\nexec \"{}\" \\\n  -Declipse.application=org.eclipse.jdt.ls.core.id1 \\\n  -Dosgi.bundles.defaultStartLevel=4 \\\n  -Declipse.product=org.eclipse.jdt.ls.core.product \\\n  -Dlog.level=ALL \\\n  -Xmx1G \\\n  --add-modules=ALL-SYSTEM \\\n  --add-opens java.base/java.util=ALL-UNNAMED \\\n  --add-opens java.base/java.lang=ALL-UNNAMED \\\n  -jar \"{}\" \\\n  -configuration \"{}\" \\\n  \"$@\"\n",
         java.display(),
@@ -434,9 +517,15 @@ async fn install_jdtls() -> Result<PathBuf> {
 
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching Eclipse JDT Language Server (using JDK at {})...", java.display());
+    println!(
+        "Fetching Eclipse JDT Language Server (using JDK at {})...",
+        java.display()
+    );
 
-    let bytes = download_bytes("https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz").await?;
+    let bytes = download_bytes(
+        "https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz",
+    )
+    .await?;
     let temp_dir = unique_temp_dir()?;
     let temp_path = temp_dir.join("jdt-language-server-latest.tar.gz");
     std::fs::write(&temp_path, &bytes)?;
@@ -446,16 +535,32 @@ async fn install_jdtls() -> Result<PathBuf> {
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::create_dir_all(&dest)?;
-    let output = Command::new("tar").arg("-xzf").arg(&temp_path).arg("-C").arg(&dest).output()?;
+    let output = Command::new("tar")
+        .arg("-xzf")
+        .arg(&temp_path)
+        .arg("-C")
+        .arg(&dest)
+        .output()?;
     if !output.status.success() {
-        bail!("Failed to extract jdtls: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Failed to extract jdtls: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     std::fs::remove_dir_all(&temp_dir).ok();
 
-    let launcher = find_launcher_jar(&dest).ok_or_else(|| anyhow!("jdtls archive extracted but no launcher jar found under {}", dest.join("plugins").display()))?;
+    let launcher = find_launcher_jar(&dest).ok_or_else(|| {
+        anyhow!(
+            "jdtls archive extracted but no launcher jar found under {}",
+            dest.join("plugins").display()
+        )
+    })?;
     let config_dir = dest.join(jdtls_config_dir_name());
     if !config_dir.exists() {
-        bail!("jdtls archive extracted but expected config dir is missing: {}", config_dir.display());
+        bail!(
+            "jdtls archive extracted but expected config dir is missing: {}",
+            config_dir.display()
+        );
     }
 
     let wrapper = install_dir.join("jdtls");
@@ -475,8 +580,16 @@ fn check_jdtls_version() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn kotlin_server_bin(install_dir: &Path) -> PathBuf {
-    let name = if std::env::consts::OS == "windows" { "kotlin-language-server.bat" } else { "kotlin-language-server" };
-    install_dir.join("kotlin").join("server").join("bin").join(name)
+    let name = if std::env::consts::OS == "windows" {
+        "kotlin-language-server.bat"
+    } else {
+        "kotlin-language-server"
+    };
+    install_dir
+        .join("kotlin")
+        .join("server")
+        .join("bin")
+        .join(name)
 }
 
 async fn install_kotlin() -> Result<PathBuf> {
@@ -486,7 +599,11 @@ async fn install_kotlin() -> Result<PathBuf> {
 
     let filename = "server.zip";
     let release = fetch_latest_release("fwcd/kotlin-language-server").await?;
-    let asset = release.assets.iter().find(|a| a.name == filename).ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == filename)
+        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
@@ -500,9 +617,17 @@ async fn install_kotlin() -> Result<PathBuf> {
     }
     std::fs::create_dir_all(&dest)?;
 
-    let output = Command::new("unzip").args(["-q", "-o"]).arg(&temp_path).arg("-d").arg(&dest).output()?;
+    let output = Command::new("unzip")
+        .args(["-q", "-o"])
+        .arg(&temp_path)
+        .arg("-d")
+        .arg(&dest)
+        .output()?;
     if !output.status.success() {
-        bail!("Failed to unzip kotlin-language-server: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Failed to unzip kotlin-language-server: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let server_bin = kotlin_server_bin(&install_dir);
@@ -548,7 +673,11 @@ async fn install_clangd() -> Result<PathBuf> {
     let release = fetch_latest_release("clangd/clangd").await?;
     let version = release.tag_name.clone();
     let filename = clangd_asset_name(&version)?;
-    let asset = release.assets.iter().find(|a| a.name == filename).ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == filename)
+        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
@@ -565,9 +694,17 @@ async fn install_clangd() -> Result<PathBuf> {
         std::fs::remove_dir_all(&extract_dir)?;
     }
     std::fs::create_dir_all(&extract_dir)?;
-    let output = Command::new("unzip").args(["-q", "-o"]).arg(&temp_path).arg("-d").arg(&extract_dir).output()?;
+    let output = Command::new("unzip")
+        .args(["-q", "-o"])
+        .arg(&temp_path)
+        .arg("-d")
+        .arg(&extract_dir)
+        .output()?;
     if !output.status.success() {
-        bail!("Failed to unzip clangd: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Failed to unzip clangd: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     std::fs::remove_dir_all(&temp_dir).ok();
 
@@ -589,7 +726,10 @@ async fn install_clangd() -> Result<PathBuf> {
 
     let bin = install_dir.join(clangd_server_bin());
     if !bin.exists() {
-        bail!("clangd archive extracted but binary is missing at {}", bin.display());
+        bail!(
+            "clangd archive extracted but binary is missing at {}",
+            bin.display()
+        );
     }
     #[cfg(unix)]
     {
@@ -636,7 +776,11 @@ async fn install_lua_language_server() -> Result<PathBuf> {
     let release = fetch_latest_release("LuaLS/lua-language-server").await?;
     let version = release.tag_name.clone();
     let filename = lua_language_server_asset_name(&version)?;
-    let asset = release.assets.iter().find(|a| a.name == filename).ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == filename)
+        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
@@ -649,15 +793,26 @@ async fn install_lua_language_server() -> Result<PathBuf> {
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::create_dir_all(&dest)?;
-    let output = Command::new("tar").arg("-xzf").arg(&temp_path).arg("-C").arg(&dest).output()?;
+    let output = Command::new("tar")
+        .arg("-xzf")
+        .arg(&temp_path)
+        .arg("-C")
+        .arg(&dest)
+        .output()?;
     if !output.status.success() {
-        bail!("Failed to extract lua-language-server: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Failed to extract lua-language-server: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     std::fs::remove_dir_all(&temp_dir).ok();
 
     let bin = install_dir.join(lua_language_server_bin());
     if !bin.exists() {
-        bail!("lua-language-server archive extracted but binary is missing at {}", bin.display());
+        bail!(
+            "lua-language-server archive extracted but binary is missing at {}",
+            bin.display()
+        );
     }
     #[cfg(unix)]
     {
@@ -695,7 +850,11 @@ async fn install_zls() -> Result<PathBuf> {
 
     let filename = zls_asset_name()?;
     let release = fetch_latest_release("zigtools/zls").await?;
-    let asset = release.assets.iter().find(|a| a.name == filename).ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == filename)
+        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
@@ -703,15 +862,26 @@ async fn install_zls() -> Result<PathBuf> {
     let temp_path = temp_dir.join(filename);
     std::fs::write(&temp_path, &bytes)?;
 
-    let output = Command::new("tar").arg("-xJf").arg(&temp_path).arg("-C").arg(&install_dir).output()?;
+    let output = Command::new("tar")
+        .arg("-xJf")
+        .arg(&temp_path)
+        .arg("-C")
+        .arg(&install_dir)
+        .output()?;
     if !output.status.success() {
-        bail!("Failed to extract zls: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Failed to extract zls: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     std::fs::remove_dir_all(&temp_dir).ok();
 
     let bin = install_dir.join("zls");
     if !bin.exists() {
-        bail!("zls archive extracted but binary is missing at {}", bin.display());
+        bail!(
+            "zls archive extracted but binary is missing at {}",
+            bin.display()
+        );
     }
     #[cfg(unix)]
     {
@@ -749,7 +919,11 @@ fn install_csharp_ls() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
     println!("Installing csharp-ls via dotnet tool install...");
-    let status = Command::new("dotnet").args(["tool", "install", "--tool-path"]).arg(&install_dir).arg("csharp-ls").status();
+    let status = Command::new("dotnet")
+        .args(["tool", "install", "--tool-path"])
+        .arg(&install_dir)
+        .arg("csharp-ls")
+        .status();
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => bail!("dotnet tool install failed with exit code {:?}", s.code()),
@@ -757,7 +931,10 @@ fn install_csharp_ls() -> Result<PathBuf> {
     }
     let bin = install_dir.join("csharp-ls");
     if !bin.exists() {
-        bail!("dotnet tool install succeeded but csharp-ls binary is missing at {}", bin.display());
+        bail!(
+            "dotnet tool install succeeded but csharp-ls binary is missing at {}",
+            bin.display()
+        );
     }
     println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
@@ -775,7 +952,10 @@ fn install_ruby_lsp() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
     println!("Installing ruby-lsp via gem install...");
-    let status = Command::new("gem").args(["install", "ruby-lsp", "--no-document", "--bindir"]).arg(&install_dir).status();
+    let status = Command::new("gem")
+        .args(["install", "ruby-lsp", "--no-document", "--bindir"])
+        .arg(&install_dir)
+        .status();
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => bail!("gem install failed with exit code {:?}", s.code()),
@@ -783,7 +963,10 @@ fn install_ruby_lsp() -> Result<PathBuf> {
     }
     let bin = install_dir.join("ruby-lsp");
     if !bin.exists() {
-        bail!("gem install succeeded but ruby-lsp binary is missing at {}", bin.display());
+        bail!(
+            "gem install succeeded but ruby-lsp binary is missing at {}",
+            bin.display()
+        );
     }
     println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
@@ -815,7 +998,10 @@ async fn install_language(language: &str) -> Result<PathBuf> {
         "zig" => install_zls().await,
         "csharp" => install_csharp_ls(),
         "ruby" => install_ruby_lsp(),
-        other => bail!("Unknown language: {other}\nSupported: {}", MANAGED_LANGUAGES.join(", ")),
+        other => bail!(
+            "Unknown language: {other}\nSupported: {}",
+            MANAGED_LANGUAGES.join(", ")
+        ),
     }
 }
 
@@ -855,7 +1041,10 @@ pub async fn run_install(language: &str, update: bool) -> Result<()> {
     }
 
     if !is_managed(language) {
-        bail!("Unknown language: {language}\nSupported: {}", MANAGED_LANGUAGES.join(", "));
+        bail!(
+            "Unknown language: {language}\nSupported: {}",
+            MANAGED_LANGUAGES.join(", ")
+        );
     }
 
     if let Some(version) = check_version(language) {
@@ -908,8 +1097,17 @@ pub fn run_install_list() -> Result<()> {
     for lang in crate::registry::languages() {
         if lang.name == "deno" {
             let version = check_deno_version();
-            let status = if version.is_some() { "on PATH" } else { "not found (unmanaged)" };
-            println!("{:<14}{:<12}{}", lang.name, status, version.unwrap_or_default());
+            let status = if version.is_some() {
+                "on PATH"
+            } else {
+                "not found (unmanaged)"
+            };
+            println!(
+                "{:<14}{:<12}{}",
+                lang.name,
+                status,
+                version.unwrap_or_default()
+            );
             continue;
         }
         if !is_managed(lang.name) {
@@ -917,8 +1115,17 @@ pub fn run_install_list() -> Result<()> {
             continue;
         }
         let version = check_version(lang.name);
-        let status = if version.is_some() { "installed" } else { "missing" };
-        println!("{:<14}{:<12}{}", lang.name, status, version.unwrap_or_default());
+        let status = if version.is_some() {
+            "installed"
+        } else {
+            "missing"
+        };
+        println!(
+            "{:<14}{:<12}{}",
+            lang.name,
+            status,
+            version.unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -929,12 +1136,30 @@ mod tests {
 
     #[test]
     fn rust_analyzer_target_covers_every_documented_platform() {
-        assert_eq!(rust_analyzer_target_for("linux", "x86_64").unwrap(), ("x86_64-unknown-linux-gnu", ".gz"));
-        assert_eq!(rust_analyzer_target_for("linux", "aarch64").unwrap(), ("aarch64-unknown-linux-gnu", ".gz"));
-        assert_eq!(rust_analyzer_target_for("macos", "x86_64").unwrap(), ("x86_64-apple-darwin", ".gz"));
-        assert_eq!(rust_analyzer_target_for("macos", "aarch64").unwrap(), ("aarch64-apple-darwin", ".gz"));
-        assert_eq!(rust_analyzer_target_for("windows", "x86_64").unwrap(), ("x86_64-pc-windows-msvc", ".zip"));
-        assert_eq!(rust_analyzer_target_for("windows", "aarch64").unwrap(), ("aarch64-pc-windows-msvc", ".zip"));
+        assert_eq!(
+            rust_analyzer_target_for("linux", "x86_64").unwrap(),
+            ("x86_64-unknown-linux-gnu", ".gz")
+        );
+        assert_eq!(
+            rust_analyzer_target_for("linux", "aarch64").unwrap(),
+            ("aarch64-unknown-linux-gnu", ".gz")
+        );
+        assert_eq!(
+            rust_analyzer_target_for("macos", "x86_64").unwrap(),
+            ("x86_64-apple-darwin", ".gz")
+        );
+        assert_eq!(
+            rust_analyzer_target_for("macos", "aarch64").unwrap(),
+            ("aarch64-apple-darwin", ".gz")
+        );
+        assert_eq!(
+            rust_analyzer_target_for("windows", "x86_64").unwrap(),
+            ("x86_64-pc-windows-msvc", ".zip")
+        );
+        assert_eq!(
+            rust_analyzer_target_for("windows", "aarch64").unwrap(),
+            ("aarch64-pc-windows-msvc", ".zip")
+        );
     }
 
     #[test]
@@ -969,7 +1194,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&wrapper).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "wrapper should be executable for user/group/other");
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "wrapper should be executable for user/group/other"
+            );
         }
     }
 
@@ -981,8 +1210,14 @@ mod tests {
         // would claim to support a language it can't actually install.
         for lang in MANAGED_LANGUAGES {
             let has_npm_spec = npm_spec(lang).is_some();
-            let has_explicit_arm = matches!(*lang, "go" | "rust" | "java" | "kotlin" | "cpp" | "lua" | "zig" | "csharp" | "ruby");
-            assert!(has_npm_spec || has_explicit_arm, "managed language `{lang}` has no install path wired up");
+            let has_explicit_arm = matches!(
+                *lang,
+                "go" | "rust" | "java" | "kotlin" | "cpp" | "lua" | "zig" | "csharp" | "ruby"
+            );
+            assert!(
+                has_npm_spec || has_explicit_arm,
+                "managed language `{lang}` has no install path wired up"
+            );
         }
     }
 
@@ -993,7 +1228,11 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for lang in MANAGED_LANGUAGES {
             if let Some(spec) = npm_spec(lang) {
-                assert!(seen.insert(spec.wrapper_name), "duplicate wrapper_name `{}` for language `{lang}`", spec.wrapper_name);
+                assert!(
+                    seen.insert(spec.wrapper_name),
+                    "duplicate wrapper_name `{}` for language `{lang}`",
+                    spec.wrapper_name
+                );
             }
         }
     }

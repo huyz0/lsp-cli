@@ -23,9 +23,19 @@ fn reports_a_real_type_error() {
     let data = lsp_json(&["diagnostics", broken.to_str().unwrap()]);
     assert_eq!(data["kind"], "diagnostics");
     let items = data["items"].as_array().unwrap();
-    assert!(!items.is_empty(), "expected at least one diagnostic, got {items:?}");
+    assert!(
+        !items.is_empty(),
+        "expected at least one diagnostic, got {items:?}"
+    );
     assert_eq!(items[0]["severity"], "error");
-    assert!(items[0]["message"].as_str().unwrap().contains("not assignable"), "unexpected message: {}", items[0]["message"]);
+    assert!(
+        items[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not assignable"),
+        "unexpected message: {}",
+        items[0]["message"]
+    );
 }
 
 #[test]

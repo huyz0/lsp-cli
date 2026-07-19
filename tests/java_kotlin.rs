@@ -17,7 +17,12 @@ fn java_outline_returns_class_with_method() {
     let user = fixture("java_project/src/main/java/com/example/User.java");
     let data = lsp_json(&["outline", user.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }
 
@@ -30,6 +35,11 @@ fn kotlin_outline_returns_class_with_method() {
     let user = fixture("kotlin_project/src/main/kotlin/User.kt");
     let data = lsp_json(&["outline", user.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }

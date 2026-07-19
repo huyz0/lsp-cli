@@ -97,7 +97,14 @@ pub struct Manager {
 impl Manager {
     pub fn new() -> (Self, mpsc::UnboundedReceiver<crate::watcher::WatchBatch>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { servers: Mutex::new(HashMap::new()), create_locks: Mutex::new(HashMap::new()), watcher: WatcherManager::new(tx) }, rx)
+        (
+            Self {
+                servers: Mutex::new(HashMap::new()),
+                create_locks: Mutex::new(HashMap::new()),
+                watcher: WatcherManager::new(tx),
+            },
+            rx,
+        )
     }
 
     /// Returns the per-key lock for `key`, creating it if this is the first
@@ -105,11 +112,21 @@ impl Manager {
     /// by `create_locks` itself — the returned `Arc<Mutex<()>>` is what
     /// actually serializes `create()` for this one key.
     async fn create_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
-        self.create_locks.lock().await.entry(key.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        self.create_locks
+            .lock()
+            .await
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub async fn list(&self) -> Vec<ManagedServerInfo> {
-        self.servers.lock().await.values().map(|s| s.info.clone()).collect()
+        self.servers
+            .lock()
+            .await
+            .values()
+            .map(|s| s.info.clone())
+            .collect()
     }
 
     pub async fn create(&self, path: &str) -> Result<ManagedServerInfo> {
@@ -155,7 +172,13 @@ impl Manager {
         let bin = server_path(detected.lang.server_bin, &install_dir);
         let args = (detected.lang.server_args)(&root);
 
-        let mut info = ManagedServerInfo { project_root: root.clone(), language: detected.lang.name.to_string(), status: "starting".into(), idle_since: now_ms(), pid: None };
+        let mut info = ManagedServerInfo {
+            project_root: root.clone(),
+            language: detected.lang.name.to_string(),
+            status: "starting".into(),
+            idle_since: now_ms(),
+            pid: None,
+        };
 
         let client_res = LspClient::spawn(&bin.to_string_lossy(), &args, &root).await;
         let client = match client_res {
@@ -176,9 +199,14 @@ impl Manager {
             }
         };
 
-        self.watcher.ensure_watching(&root, detected.lang.extensions).await;
+        self.watcher
+            .ensure_watching(&root, detected.lang.extensions)
+            .await;
 
-        let entry = ManagedServer { client: Arc::new(Mutex::new(client)), info: info.clone() };
+        let entry = ManagedServer {
+            client: Arc::new(Mutex::new(client)),
+            info: info.clone(),
+        };
         self.servers.lock().await.insert(key, entry);
         Ok(info)
     }
@@ -210,7 +238,13 @@ impl Manager {
     /// each helper's doc comment for why. Adding a third such case should
     /// follow the same pattern — a private, well-named helper dispatched
     /// from here — rather than growing this match arm-by-arm.
-    pub async fn proxy_request(&self, project_root: &str, language: Option<&str>, method: &str, params: Value) -> Result<Value> {
+    pub async fn proxy_request(
+        &self,
+        project_root: &str,
+        language: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
 
@@ -226,12 +260,25 @@ impl Manager {
     /// `publishDiagnostics` notifications and answers a pull request with
     /// "method not found". Fall back to whatever's been pushed and cached
     /// for this URI instead of surfacing that as a hard failure.
-    async fn diagnostic_with_push_fallback(c: &mut LspClient, method: &str, params: &Value) -> Result<Value> {
+    async fn diagnostic_with_push_fallback(
+        c: &mut LspClient,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value> {
         match c.request(method, params.clone()).await {
             Ok(v) => Ok(v),
-            Err(e) if crate::lsp_client::is_rpc_error_code(&e, crate::lsp_client::METHOD_NOT_FOUND) => {
+            Err(e)
+                if crate::lsp_client::is_rpc_error_code(
+                    &e,
+                    crate::lsp_client::METHOD_NOT_FOUND,
+                ) =>
+            {
                 c.drain_pending_notifications().await;
-                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or_default();
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|t| t.get("uri"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default();
                 Ok(serde_json::json!({ "items": c.cached_diagnostics(uri) }))
             }
             Err(e) => Err(e),
@@ -240,7 +287,13 @@ impl Manager {
 
     /// Same as `proxy_request` but for a fire-and-forget notification
     /// (`textDocument/didOpen`, etc.) — no result to return.
-    pub async fn proxy_notify(&self, project_root: &str, language: Option<&str>, method: &str, params: Value) -> Result<()> {
+    pub async fn proxy_notify(
+        &self,
+        project_root: &str,
+        language: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<()> {
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
 
@@ -256,17 +309,37 @@ impl Manager {
     /// file may already be open from an earlier call, so this needs to
     /// become a `didChange` instead of a second `didOpen`.
     async fn didopen_as_sync_document(c: &mut LspClient, params: &Value) -> Result<()> {
-        let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or_default();
-        let language_id = params.get("textDocument").and_then(|t| t.get("languageId")).and_then(|l| l.as_str()).unwrap_or_default();
-        let text = params.get("textDocument").and_then(|t| t.get("text")).and_then(|t| t.as_str()).unwrap_or_default();
+        let uri = params
+            .get("textDocument")
+            .and_then(|t| t.get("uri"))
+            .and_then(|u| u.as_str())
+            .unwrap_or_default();
+        let language_id = params
+            .get("textDocument")
+            .and_then(|t| t.get("languageId"))
+            .and_then(|l| l.as_str())
+            .unwrap_or_default();
+        let text = params
+            .get("textDocument")
+            .and_then(|t| t.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
         c.sync_document(uri, language_id, text).await
     }
 
-    async fn find_running_client(&self, project_root: &str, language: Option<&str>) -> Result<Arc<Mutex<LspClient>>> {
+    async fn find_running_client(
+        &self,
+        project_root: &str,
+        language: Option<&str>,
+    ) -> Result<Arc<Mutex<LspClient>>> {
         let mut servers = self.servers.lock().await;
         let entry = servers
             .values_mut()
-            .find(|s| s.info.project_root == project_root && language.is_none_or(|l| s.info.language == l) && s.info.status == "running")
+            .find(|s| {
+                s.info.project_root == project_root
+                    && language.is_none_or(|l| s.info.language == l)
+                    && s.info.status == "running"
+            })
             .ok_or_else(|| anyhow::anyhow!("No server running for project: {project_root}"))?;
         entry.info.idle_since = now_ms();
         Ok(entry.client.clone())
@@ -275,7 +348,12 @@ impl Manager {
     /// Stops the file watcher for `project_root` if no server is left
     /// running for it — call after removing entries from `servers`.
     async fn stop_watcher_if_unused(&self, project_root: &str) {
-        let still_used = self.servers.lock().await.values().any(|s| s.info.project_root == project_root);
+        let still_used = self
+            .servers
+            .lock()
+            .await
+            .values()
+            .any(|s| s.info.project_root == project_root);
         if !still_used {
             self.watcher.stop(project_root).await;
         }
@@ -314,7 +392,10 @@ impl Manager {
 
         let removed: Vec<ManagedServer> = {
             let mut servers = self.servers.lock().await;
-            stale_keys.into_iter().filter_map(|key| servers.remove(&key)).collect()
+            stale_keys
+                .into_iter()
+                .filter_map(|key| servers.remove(&key))
+                .collect()
         };
 
         let mut removed_roots = Vec::new();
@@ -336,7 +417,9 @@ impl Manager {
             } else if let Some(path) = &req.path {
                 servers
                     .iter()
-                    .filter(|(k, s)| &s.info.project_root == path || k.starts_with(&format!("{path}::")))
+                    .filter(|(k, s)| {
+                        &s.info.project_root == path || k.starts_with(&format!("{path}::"))
+                    })
                     .map(|(k, _)| k.clone())
                     .collect()
             } else {
@@ -360,7 +443,10 @@ impl Manager {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Pure predicate extracted out of reap_idle for direct unit testing.
@@ -369,7 +455,10 @@ fn is_stale(idle_since: i64, now: i64, cutoff_ms: i64) -> bool {
 }
 
 pub fn socket_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lsp-cli").join("manager.sock")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lsp-cli")
+        .join("manager.sock")
 }
 
 type SharedManager = Arc<Manager>;
@@ -378,26 +467,51 @@ async fn list_handler(State(m): State<SharedManager>) -> Json<Vec<ManagedServerI
     Json(m.list().await)
 }
 
-async fn create_handler(State(m): State<SharedManager>, Json(req): Json<CreateRequest>) -> Result<Json<ManagedServerInfo>, (axum::http::StatusCode, String)> {
-    m.create(&req.path).await.map(Json).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-async fn delete_handler(State(m): State<SharedManager>, Json(req): Json<DeleteRequest>) -> Json<Vec<ManagedServerInfo>> {
-    Json(m.delete(req).await)
-}
-
-async fn request_handler(State(m): State<SharedManager>, Json(req): Json<ProxyRequest>) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
-    m.proxy_request(&req.project_root, req.language.as_deref(), &req.method, req.params)
+async fn create_handler(
+    State(m): State<SharedManager>,
+    Json(req): Json<CreateRequest>,
+) -> Result<Json<ManagedServerInfo>, (axum::http::StatusCode, String)> {
+    m.create(&req.path)
         .await
         .map(Json)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-async fn notify_handler(State(m): State<SharedManager>, Json(req): Json<ProxyRequest>) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
-    m.proxy_notify(&req.project_root, req.language.as_deref(), &req.method, req.params)
-        .await
-        .map(|_| axum::http::StatusCode::NO_CONTENT)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+async fn delete_handler(
+    State(m): State<SharedManager>,
+    Json(req): Json<DeleteRequest>,
+) -> Json<Vec<ManagedServerInfo>> {
+    Json(m.delete(req).await)
+}
+
+async fn request_handler(
+    State(m): State<SharedManager>,
+    Json(req): Json<ProxyRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    m.proxy_request(
+        &req.project_root,
+        req.language.as_deref(),
+        &req.method,
+        req.params,
+    )
+    .await
+    .map(Json)
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn notify_handler(
+    State(m): State<SharedManager>,
+    Json(req): Json<ProxyRequest>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    m.proxy_notify(
+        &req.project_root,
+        req.language.as_deref(),
+        &req.method,
+        req.params,
+    )
+    .await
+    .map(|_| axum::http::StatusCode::NO_CONTENT)
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
@@ -488,7 +602,13 @@ pub async fn start_daemon() -> Result<()> {
     let watch_manager = manager.clone();
     tokio::spawn(async move {
         while let Some((root, changes)) = watch_rx.recv().await {
-            watch_manager.broadcast_notify(&root, "workspace/didChangeWatchedFiles", serde_json::json!({ "changes": changes })).await;
+            watch_manager
+                .broadcast_notify(
+                    &root,
+                    "workspace/didChangeWatchedFiles",
+                    serde_json::json!({ "changes": changes }),
+                )
+                .await;
         }
     });
 
@@ -512,11 +632,16 @@ async fn serve_uds(listener: tokio::net::UnixListener, router: Router) -> Result
             let io = hyper_util::rt::TokioIo::new(stream);
             let service = hyper::service::service_fn(move |req| {
                 let router = router.clone();
-                async move { Ok::<_, std::convert::Infallible>(tower::ServiceExt::oneshot(router, req).await.unwrap()) }
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        tower::ServiceExt::oneshot(router, req).await.unwrap(),
+                    )
+                }
             });
-            let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                .serve_connection(io, service)
-                .await;
+            let _ =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
         });
     }
 }

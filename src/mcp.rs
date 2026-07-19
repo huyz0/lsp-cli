@@ -82,12 +82,16 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                                 "result": { "isError": is_error, "content": [{ "type": "text", "text": text }] }
                             })
                         }
-                        Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e.to_string() } }),
+                        Err(e) => {
+                            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e.to_string() } })
+                        }
                     }
                 }
             }
             "" => continue,
-            other => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Unknown method: {other}") } }),
+            other => {
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Unknown method: {other}") } })
+            }
         };
 
         writeln!(stdout, "{response}")?;

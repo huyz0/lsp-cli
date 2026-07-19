@@ -31,8 +31,16 @@ fn css_outline_returns_selector() {
     let css = web_fixture("styles.css");
     let data = lsp_json(&["outline", css.to_str().unwrap()]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&".greeting"), "expected .greeting in {names:?}");
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&".greeting"),
+        "expected .greeting in {names:?}"
+    );
 }
 
 #[test]
@@ -42,7 +50,14 @@ fn css_doc_returns_hover_for_selector() {
         return;
     }
     let css = web_fixture("styles.css");
-    let data = lsp_json(&["doc", css.to_str().unwrap(), "--scope", "1", "--find", ".<|>greeting"]);
+    let data = lsp_json(&[
+        "doc",
+        css.to_str().unwrap(),
+        "--scope",
+        "1",
+        "--find",
+        ".<|>greeting",
+    ]);
     assert_eq!(data["kind"], "hover");
     assert!(!data["content"].as_str().unwrap().is_empty());
 }
@@ -64,7 +79,12 @@ fn json_outline_returns_keys_with_all_flag() {
     // from outline.ts) intentionally excludes; --all bypasses that filter.
     let data = lsp_json(&["outline", json_file.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"name"), "expected name in {names:?}");
     assert!(names.contains(&"version"), "expected version in {names:?}");
 }

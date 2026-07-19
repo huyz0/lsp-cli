@@ -10,7 +10,12 @@ fn outline_returns_class_with_methods() {
     let models = py_fixture("src/models.py");
     let data = lsp_json(&["outline", models.to_str().unwrap()]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }
 
@@ -21,7 +26,14 @@ fn definition_follows_cross_file_import() {
         return;
     }
     let service = py_fixture("src/service.py");
-    let data = lsp_json(&["definition", service.to_str().unwrap(), "--scope", "create_user", "--find", "<|>User("]);
+    let data = lsp_json(&[
+        "definition",
+        service.to_str().unwrap(),
+        "--scope",
+        "create_user",
+        "--find",
+        "<|>User(",
+    ]);
     assert_eq!(data["kind"], "definition");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());
@@ -35,11 +47,20 @@ fn reference_finds_usages_across_workspace() {
         return;
     }
     let models = py_fixture("src/models.py");
-    let data = lsp_json(&["reference", models.to_str().unwrap(), "--scope", "User", "--max-items", "50"]);
+    let data = lsp_json(&[
+        "reference",
+        models.to_str().unwrap(),
+        "--scope",
+        "User",
+        "--max-items",
+        "50",
+    ]);
     assert_eq!(data["kind"], "reference");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());
-    assert!(locations.iter().any(|l| l["uri"].as_str().unwrap().contains("service.py")));
+    assert!(locations
+        .iter()
+        .any(|l| l["uri"].as_str().unwrap().contains("service.py")));
 }
 
 #[test]

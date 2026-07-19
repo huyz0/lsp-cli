@@ -8,7 +8,14 @@ fn finds_definition_of_user_imported_type() {
         return;
     }
     let service = ts_fixture("src/service.ts");
-    let data = lsp_json(&["definition", service.to_str().unwrap(), "--scope", "createUser", "--find", ": <|>User"]);
+    let data = lsp_json(&[
+        "definition",
+        service.to_str().unwrap(),
+        "--scope",
+        "createUser",
+        "--find",
+        ": <|>User",
+    ]);
     assert_eq!(data["kind"], "definition");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());

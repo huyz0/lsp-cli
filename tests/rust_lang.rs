@@ -10,7 +10,12 @@ fn outline_returns_struct_and_impl_methods() {
     let user = rust_fixture("src/user.rs");
     let data = lsp_json(&["outline", user.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }
 
@@ -27,7 +32,14 @@ fn definition_follows_cross_file_use() {
     // the TS tool; not something this port introduced). Use a line/find scope
     // instead, which works for any language.
     let main_rs = rust_fixture("src/main.rs");
-    let data = lsp_json(&["definition", main_rs.to_str().unwrap(), "--scope", "5", "--find", "let u = <|>User"]);
+    let data = lsp_json(&[
+        "definition",
+        main_rs.to_str().unwrap(),
+        "--scope",
+        "5",
+        "--find",
+        "let u = <|>User",
+    ]);
     assert_eq!(data["kind"], "definition");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());
@@ -41,7 +53,14 @@ fn doc_returns_hover_for_struct_via_line_scope() {
         return;
     }
     let user = rust_fixture("src/user.rs");
-    let data = lsp_json(&["doc", user.to_str().unwrap(), "--scope", "2", "--find", "struct <|>User"]);
+    let data = lsp_json(&[
+        "doc",
+        user.to_str().unwrap(),
+        "--scope",
+        "2",
+        "--find",
+        "struct <|>User",
+    ]);
     assert_eq!(data["kind"], "hover");
     assert!(data["content"].as_str().unwrap().contains("User"));
 }

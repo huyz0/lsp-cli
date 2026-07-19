@@ -23,7 +23,9 @@ pub fn resolve_project(file_path: &str, project_override: Option<&str>) -> Resul
     })?;
 
     let project_root = match project_override {
-        Some(p) => PathBuf::from(p).canonicalize().map_err(|e| anyhow!("--project path not found: {p} ({e})"))?,
+        Some(p) => PathBuf::from(p)
+            .canonicalize()
+            .map_err(|e| anyhow!("--project path not found: {p} ({e})"))?,
         None => detected.root,
     };
 

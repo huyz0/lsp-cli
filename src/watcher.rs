@@ -37,7 +37,10 @@ pub struct WatcherManager {
 
 impl WatcherManager {
     pub fn new(tx: mpsc::UnboundedSender<WatchBatch>) -> Self {
-        Self { watchers: Mutex::new(HashMap::new()), tx }
+        Self {
+            watchers: Mutex::new(HashMap::new()),
+            tx,
+        }
     }
 
     /// Starts watching `project_root` for changes to files with the given
@@ -51,17 +54,18 @@ impl WatcherManager {
         }
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<notify::Event>();
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                let _ = event_tx.send(event);
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("[watcher] failed to create watcher for {project_root}: {e}");
-                return;
-            }
-        };
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    let _ = event_tx.send(event);
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[watcher] failed to create watcher for {project_root}: {e}");
+                    return;
+                }
+            };
 
         if let Err(e) = watcher.watch(Path::new(project_root), RecursiveMode::Recursive) {
             eprintln!("[watcher] failed to watch {project_root}: {e}");
@@ -81,14 +85,20 @@ impl WatcherManager {
                 if let Some(v) = to_change(&first, &extensions) {
                     pending.push(v);
                 }
-                while let Ok(Some(e)) = tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv()).await {
+                while let Ok(Some(e)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv())
+                        .await
+                {
                     if let Some(v) = to_change(&e, &extensions) {
                         pending.push(v);
                     }
                 }
                 if !pending.is_empty() {
                     let changes = std::mem::take(&mut pending);
-                    eprintln!("[watcher] {} change(s) detected in {root}, notifying live servers", changes.len());
+                    eprintln!(
+                        "[watcher] {} change(s) detected in {root}, notifying live servers",
+                        changes.len()
+                    );
                     if batch_tx.send((root.clone(), changes)).is_err() {
                         // Receiver gone (daemon shutting down) — stop watching.
                         return;
@@ -97,7 +107,10 @@ impl WatcherManager {
             }
         });
 
-        watchers.insert(project_root.to_string(), WatcherHandle { _watcher: watcher });
+        watchers.insert(
+            project_root.to_string(),
+            WatcherHandle { _watcher: watcher },
+        );
     }
 
     pub async fn stop(&self, project_root: &str) {
@@ -114,7 +127,11 @@ fn to_change(event: &notify::Event, extensions: &HashSet<String>) -> Option<Valu
     let path = event.paths.first()?;
 
     let path_str = path.to_string_lossy();
-    if path_str.split('/').any(|c| c.starts_with('.')) || ["node_modules", "dist", "build", "target"].iter().any(|d| path_str.contains(&format!("/{d}/"))) {
+    if path_str.split('/').any(|c| c.starts_with('.'))
+        || ["node_modules", "dist", "build", "target"]
+            .iter()
+            .any(|d| path_str.contains(&format!("/{d}/")))
+    {
         return None;
     }
 
@@ -139,15 +156,28 @@ mod tests {
     use notify::event::{CreateKind, ModifyKind, RemoveKind};
 
     fn evt(kind: EventKind, path: &str) -> notify::Event {
-        notify::Event { kind, paths: vec![std::path::PathBuf::from(path)], attrs: Default::default() }
+        notify::Event {
+            kind,
+            paths: vec![std::path::PathBuf::from(path)],
+            attrs: Default::default(),
+        }
     }
 
     #[test]
     fn maps_create_modify_remove_to_lsp_file_change_types() {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(to_change(&evt(EventKind::Create(CreateKind::File), "/p/a.ts"), &exts).unwrap()["type"], 1);
-        assert_eq!(to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"), &exts).unwrap()["type"], 2);
-        assert_eq!(to_change(&evt(EventKind::Remove(RemoveKind::File), "/p/a.ts"), &exts).unwrap()["type"], 3);
+        assert_eq!(
+            to_change(&evt(EventKind::Create(CreateKind::File), "/p/a.ts"), &exts).unwrap()["type"],
+            1
+        );
+        assert_eq!(
+            to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"), &exts).unwrap()["type"],
+            2
+        );
+        assert_eq!(
+            to_change(&evt(EventKind::Remove(RemoveKind::File), "/p/a.ts"), &exts).unwrap()["type"],
+            3
+        );
     }
 
     #[test]
@@ -159,9 +189,21 @@ mod tests {
     #[test]
     fn filters_out_dotfiles_and_ignored_directories() {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
-        assert!(to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/.git/a.ts"), &exts).is_none());
-        assert!(to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/node_modules/a.ts"), &exts).is_none());
-        assert!(to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/dist/a.ts"), &exts).is_none());
+        assert!(to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/p/.git/a.ts"),
+            &exts
+        )
+        .is_none());
+        assert!(to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/p/node_modules/a.ts"),
+            &exts
+        )
+        .is_none());
+        assert!(to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/p/dist/a.ts"),
+            &exts
+        )
+        .is_none());
     }
 
     #[test]

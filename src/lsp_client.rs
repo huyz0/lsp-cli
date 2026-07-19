@@ -129,9 +129,12 @@ impl LspClient {
         // every notification/server-request received, so a chatty-but-stuck
         // server could otherwise hang a command forever) and independent of
         // the ContentModified retry loop below.
-        tokio::time::timeout(std::time::Duration::from_secs(120), self.request_inner(method, params))
-            .await
-            .map_err(|_| anyhow!("`{method}` did not complete within 120s"))?
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            self.request_inner(method, params),
+        )
+        .await
+        .map_err(|_| anyhow!("`{method}` did not complete within 120s"))?
     }
 
     async fn request_inner(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -143,7 +146,8 @@ impl LspClient {
         loop {
             let id = self.next_id;
             self.next_id += 1;
-            let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params.clone() });
+            let msg =
+                json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params.clone() });
             self.send(&msg).await?;
 
             match self.wait_for_response(id, method).await {
@@ -157,9 +161,18 @@ impl LspClient {
         }
     }
 
-    async fn wait_for_response(&mut self, id: i64, method: &str) -> std::result::Result<Value, RpcError> {
+    async fn wait_for_response(
+        &mut self,
+        id: i64,
+        method: &str,
+    ) -> std::result::Result<Value, RpcError> {
         loop {
-            let msg = match tokio::time::timeout(std::time::Duration::from_secs(30), self.incoming.recv()).await {
+            let msg = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.incoming.recv(),
+            )
+            .await
+            {
                 Ok(Some(m)) => m,
                 Ok(None) => return Err(RpcError::Closed(method.to_string())),
                 Err(_) => return Err(RpcError::Timeout(method.to_string())),
@@ -170,7 +183,9 @@ impl LspClient {
 
             if let (Some(server_id), Some(server_method)) = (msg_id, server_method) {
                 // Server-initiated request; answer it so the server doesn't stall.
-                self.respond_to_server_request(server_id, server_method).await.map_err(RpcError::Io)?;
+                self.respond_to_server_request(server_id, server_method)
+                    .await
+                    .map_err(RpcError::Io)?;
                 continue;
             }
 
@@ -178,7 +193,11 @@ impl LspClient {
                 if resp_id == id {
                     if let Some(err) = msg.get("error") {
                         let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-                        let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                        let message = err
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         return Err(RpcError::Server { code, message });
                     }
                     return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
@@ -198,9 +217,16 @@ impl LspClient {
         if method != Some("textDocument/publishDiagnostics") {
             return;
         }
-        let Some(params) = msg.get("params") else { return };
-        let Some(uri) = params.get("uri").and_then(|u| u.as_str()) else { return };
-        let items = params.get("diagnostics").cloned().unwrap_or(Value::Array(vec![]));
+        let Some(params) = msg.get("params") else {
+            return;
+        };
+        let Some(uri) = params.get("uri").and_then(|u| u.as_str()) else {
+            return;
+        };
+        let items = params
+            .get("diagnostics")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
         let items = items.as_array().cloned().unwrap_or_default();
         self.diagnostics.insert(uri.to_string(), items);
     }
@@ -216,7 +242,9 @@ impl LspClient {
             let msg_id = msg.get("id").and_then(|v| v.as_i64());
             let server_method = msg.get("method").and_then(|m| m.as_str());
             if let (Some(server_id), Some(server_method)) = (msg_id, server_method) {
-                let _ = self.respond_to_server_request(server_id, server_method).await;
+                let _ = self
+                    .respond_to_server_request(server_id, server_method)
+                    .await;
                 continue;
             }
             if msg_id.is_some() {
@@ -317,7 +345,11 @@ impl LspClient {
     }
 
     pub async fn shutdown(&mut self) {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), self.request("shutdown", Value::Null)).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.request("shutdown", Value::Null),
+        )
+        .await;
         let _ = self.notify("exit", Value::Null).await;
         let _ = self.child.start_kill();
     }
@@ -341,7 +373,11 @@ async fn read_loop(stdout: tokio::process::ChildStdout, tx: mpsc::UnboundedSende
             let header_str = String::from_utf8_lossy(&buf[..header_end]);
             let len = header_str
                 .lines()
-                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_string())
+                })
                 .and_then(|v| v.parse::<usize>().ok());
             let Some(len) = len else { break };
             let body_start = header_end + 4;
@@ -388,7 +424,11 @@ mod tests {
         let header_str = String::from_utf8_lossy(&bytes[..header_end]);
         let len: usize = header_str
             .lines()
-            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().to_string())
+            })
             .and_then(|v| v.parse().ok())
             .unwrap();
         assert_eq!(len, body.len());

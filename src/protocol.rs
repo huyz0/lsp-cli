@@ -45,7 +45,10 @@ impl LocationOrMany {
             LocationOrMany::Many(v) => v,
             LocationOrMany::Links(links) => links
                 .into_iter()
-                .map(|l| Location { uri: l.target_uri, range: l.target_selection_range })
+                .map(|l| Location {
+                    uri: l.target_uri,
+                    range: l.target_selection_range,
+                })
                 .collect(),
         }
     }
@@ -69,7 +72,11 @@ pub struct SymbolInformation {
     pub name: String,
     pub kind: u32,
     pub location: Location,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "containerName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "containerName"
+    )]
     pub container_name: Option<String>,
 }
 
@@ -160,7 +167,11 @@ pub enum HoverContents {
 #[serde(untagged)]
 pub enum MarkedStringOrMarkup {
     Str(String),
-    Markup { #[allow(dead_code)] kind: Option<String>, value: String },
+    Markup {
+        #[allow(dead_code)]
+        kind: Option<String>,
+        value: String,
+    },
 }
 
 impl MarkedStringOrMarkup {

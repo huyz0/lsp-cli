@@ -47,7 +47,13 @@ pub fn languages() -> &'static [LanguageConfig] {
         LanguageConfig {
             name: "python",
             extensions: &[".py", ".pyi"],
-            root_markers: &["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", ".python-version"],
+            root_markers: &[
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "requirements.txt",
+                ".python-version",
+            ],
             server_bin: "basedpyright-langserver",
             server_args: |_| vec!["--stdio".to_string()],
         },
@@ -75,14 +81,25 @@ pub fn languages() -> &'static [LanguageConfig] {
         LanguageConfig {
             name: "kotlin",
             extensions: &[".kt", ".kts"],
-            root_markers: &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pom.xml"],
+            root_markers: &[
+                "build.gradle",
+                "build.gradle.kts",
+                "settings.gradle",
+                "settings.gradle.kts",
+                "pom.xml",
+            ],
             server_bin: "kotlin/server/bin/kotlin-language-server",
             server_args: |_| vec![],
         },
         LanguageConfig {
             name: "cpp",
             extensions: &[".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
-            root_markers: &["compile_commands.json", "CMakeLists.txt", ".clangd", "Makefile"],
+            root_markers: &[
+                "compile_commands.json",
+                "CMakeLists.txt",
+                ".clangd",
+                "Makefile",
+            ],
             server_bin: "clangd/bin/clangd",
             server_args: |_| vec!["--background-index".to_string()],
         },
@@ -150,7 +167,6 @@ pub fn languages() -> &'static [LanguageConfig] {
     ]
 }
 
-
 pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
     // deno relies on PATH; everything else is installed under install_dir
     if installed_bin_name == "deno" {
@@ -162,7 +178,10 @@ pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
 
 pub fn detect_language(file_path: &Path) -> Option<LanguageConfig> {
     let ext = format!(".{}", file_path.extension()?.to_str()?.to_lowercase());
-    languages().iter().copied().find(|l| l.name != "deno" && l.extensions.contains(&ext.as_str()))
+    languages()
+        .iter()
+        .copied()
+        .find(|l| l.name != "deno" && l.extensions.contains(&ext.as_str()))
 }
 
 pub struct Detected {
@@ -176,10 +195,18 @@ pub struct Detected {
 pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
     let ext = format!(
         ".{}",
-        file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+        file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
     );
 
-    let candidates: Vec<LanguageConfig> = languages().iter().copied().filter(|l| l.extensions.contains(&ext.as_str())).collect();
+    let candidates: Vec<LanguageConfig> = languages()
+        .iter()
+        .copied()
+        .filter(|l| l.extensions.contains(&ext.as_str()))
+        .collect();
     if candidates.is_empty() {
         return None;
     }
@@ -199,14 +226,23 @@ pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
     let start_dir = file_path
         .parent()?
         .canonicalize()
-        .or_else(|_| file_path.canonicalize().and_then(|p| p.parent().map(|p| p.to_path_buf()).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))))
+        .or_else(|_| {
+            file_path.canonicalize().and_then(|p| {
+                p.parent()
+                    .map(|p| p.to_path_buf())
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            })
+        })
         .unwrap_or_else(|_| file_path.parent().unwrap_or(file_path).to_path_buf());
     let mut dir = start_dir.clone();
     loop {
         for lang in &candidates {
             for marker in lang.root_markers {
                 if dir.join(marker).exists() {
-                    return Some(Detected { lang: *lang, root: dir });
+                    return Some(Detected {
+                        lang: *lang,
+                        root: dir,
+                    });
                 }
             }
         }
@@ -218,7 +254,10 @@ pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
 
     for lang in &candidates {
         if lang.root_markers.is_empty() {
-            return Some(Detected { lang: *lang, root: start_dir });
+            return Some(Detected {
+                lang: *lang,
+                root: start_dir,
+            });
         }
     }
 
@@ -226,7 +265,10 @@ pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
 }
 
 pub fn default_install_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lsp-cli").join("servers")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lsp-cli")
+        .join("servers")
 }
 
 #[cfg(test)]

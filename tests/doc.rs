@@ -32,7 +32,14 @@ fn markdown_output_is_non_empty() {
         return;
     }
     let models = ts_fixture("src/models.ts");
-    let result = lsp(&["doc", models.to_str().unwrap(), "--scope", "User.greet", "--output", "markdown"]);
+    let result = lsp(&[
+        "doc",
+        models.to_str().unwrap(),
+        "--scope",
+        "User.greet",
+        "--output",
+        "markdown",
+    ]);
     assert_eq!(result.exit_code, 0);
     assert!(!result.stdout.trim().is_empty());
 }
@@ -56,7 +63,13 @@ fn dry_run_prints_lsp_request_without_executing() {
         return;
     }
     let models = ts_fixture("src/models.ts");
-    let result = lsp(&["doc", models.to_str().unwrap(), "--scope", "User", "--dry-run"]);
+    let result = lsp(&[
+        "doc",
+        models.to_str().unwrap(),
+        "--scope",
+        "User",
+        "--dry-run",
+    ]);
     assert_eq!(result.exit_code, 0);
     let data: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
     assert_eq!(data["method"], "textDocument/hover");

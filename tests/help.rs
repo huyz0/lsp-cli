@@ -8,7 +8,16 @@ fn help_lists_all_commands() {
     let stdout = result.stdout.to_lowercase();
 
     assert!(stdout.contains("usage:"));
-    for cmd in ["outline", "definition", "reference", "doc", "symbol", "search", "locate", "install"] {
+    for cmd in [
+        "outline",
+        "definition",
+        "reference",
+        "doc",
+        "symbol",
+        "search",
+        "locate",
+        "install",
+    ] {
         assert!(stdout.contains(cmd), "help output missing `{cmd}`");
     }
     assert!(stdout.contains("--help"));

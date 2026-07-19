@@ -38,7 +38,10 @@ impl Default for LspCliConfig {
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lsp-cli").join("config.json")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lsp-cli")
+        .join("config.json")
 }
 
 /// Load config, merging user overrides over defaults. Never errors: falls back
@@ -132,7 +135,11 @@ mod tests {
     fn full_override_file_replaces_all_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"idleTimeout": 1, "managerTimeout": 2, "defaultMaxItems": 3}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"idleTimeout": 1, "managerTimeout": 2, "defaultMaxItems": 3}"#,
+        )
+        .unwrap();
         let cfg = load_config_from(&path);
         assert_eq!(cfg.idle_timeout, 1);
         assert_eq!(cfg.manager_timeout, 2);
@@ -143,7 +150,11 @@ mod tests {
     fn unknown_fields_in_the_file_are_ignored_not_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"idleTimeout": 99, "somethingLspCliDoesNotKnowAbout": true}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"idleTimeout": 99, "somethingLspCliDoesNotKnowAbout": true}"#,
+        )
+        .unwrap();
         let cfg = load_config_from(&path);
         assert_eq!(cfg.idle_timeout, 99);
     }

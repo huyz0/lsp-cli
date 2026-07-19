@@ -32,16 +32,32 @@ pub fn lsp_json(args: &[&str]) -> serde_json::Value {
     full.push("--output");
     full.push("json");
     let result = lsp(&full);
-    assert_eq!(result.exit_code, 0, "lsp {:?} exited {}: {}", full, result.exit_code, result.stderr);
-    serde_json::from_str(&result.stdout).unwrap_or_else(|e| panic!("invalid JSON from lsp {:?}: {e}\nstdout: {}", full, result.stdout))
+    assert_eq!(
+        result.exit_code, 0,
+        "lsp {:?} exited {}: {}",
+        full, result.exit_code, result.stderr
+    );
+    serde_json::from_str(&result.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from lsp {:?}: {e}\nstdout: {}",
+            full, result.stdout
+        )
+    })
 }
 
 pub fn has_binary(name: &str) -> bool {
-    Command::new("which").arg(name).output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn lsp_cli_servers_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lsp-cli").join("servers")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lsp-cli")
+        .join("servers")
 }
 
 fn has_server(bin_name: &str) -> bool {
@@ -113,7 +129,9 @@ pub fn has_ruby_lsp() -> bool {
 }
 
 pub fn fixture(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(rel)
 }
 
 pub fn ts_fixture(rel: &str) -> PathBuf {

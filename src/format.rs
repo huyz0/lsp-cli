@@ -1,4 +1,6 @@
-use crate::protocol::{symbol_kind_name, CallHierarchyItem, Diagnostic, DocumentSymbol, HoverResult, Location};
+use crate::protocol::{
+    symbol_kind_name, CallHierarchyItem, Diagnostic, DocumentSymbol, HoverResult, Location,
+};
 use serde_json::json;
 
 pub enum OutputFormat {
@@ -41,7 +43,10 @@ fn severity_name(severity: Option<u32>) -> &'static str {
 }
 
 fn icon(kind: u32) -> &'static str {
-    use crate::protocol::symbol_kind::{CLASS, CONSTANT, CONSTRUCTOR, ENUM, FIELD, FUNCTION, INTERFACE, METHOD, MODULE, NAMESPACE, PROPERTY, VARIABLE};
+    use crate::protocol::symbol_kind::{
+        CLASS, CONSTANT, CONSTRUCTOR, ENUM, FIELD, FUNCTION, INTERFACE, METHOD, MODULE, NAMESPACE,
+        PROPERTY, VARIABLE,
+    };
     match kind {
         CLASS => "◆",
         INTERFACE => "◇",
@@ -87,7 +92,14 @@ impl OutputFormat {
                 }
                 locations
                     .iter()
-                    .map(|l| format!("→ {}:{}:{}", uri_to_path(&l.uri), l.range.start.line + 1, l.range.start.character + 1))
+                    .map(|l| {
+                        format!(
+                            "→ {}:{}:{}",
+                            uri_to_path(&l.uri),
+                            l.range.start.line + 1,
+                            l.range.start.character + 1
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -112,7 +124,14 @@ impl OutputFormat {
                 locations
                     .iter()
                     .enumerate()
-                    .map(|(i, l)| format!("{}. {}:{}", i + 1, uri_to_path(&l.uri), l.range.start.line + 1))
+                    .map(|(i, l)| {
+                        format!(
+                            "{}. {}:{}",
+                            i + 1,
+                            uri_to_path(&l.uri),
+                            l.range.start.line + 1
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -136,7 +155,13 @@ impl OutputFormat {
                 "source": source,
             })
             .to_string(),
-            OutputFormat::Markdown => format!("### {} {} [{}]\n\n```\n{}\n```", icon(kind), name, symbol_kind_name(kind), source),
+            OutputFormat::Markdown => format!(
+                "### {} {} [{}]\n\n```\n{}\n```",
+                icon(kind),
+                name,
+                symbol_kind_name(kind),
+                source
+            ),
         }
     }
 
@@ -162,7 +187,15 @@ impl OutputFormat {
                 }
                 diagnostics
                     .iter()
-                    .map(|d| format!("{}:{}: [{}] {}", d.range.start.line + 1, d.range.start.character + 1, severity_name(d.severity), d.message))
+                    .map(|d| {
+                        format!(
+                            "{}:{}: [{}] {}",
+                            d.range.start.line + 1,
+                            d.range.start.character + 1,
+                            severity_name(d.severity),
+                            d.message
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -190,7 +223,15 @@ impl OutputFormat {
                 }
                 items
                     .iter()
-                    .map(|i| format!("{} {} — {}:{}", icon(i.kind), i.name, uri_to_path(&i.uri), i.selection_range.start.line + 1))
+                    .map(|i| {
+                        format!(
+                            "{} {} — {}:{}",
+                            icon(i.kind),
+                            i.name,
+                            uri_to_path(&i.uri),
+                            i.selection_range.start.line + 1
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -212,14 +253,26 @@ mod tests {
 
     #[test]
     fn markdown_definition_reports_no_results() {
-        assert_eq!(OutputFormat::Markdown.definition(&[]), "No definition found.");
+        assert_eq!(
+            OutputFormat::Markdown.definition(&[]),
+            "No definition found."
+        );
     }
 
     #[test]
     fn json_definition_converts_to_1_based_lines() {
         let loc = Location {
             uri: "file:///a.rs".into(),
-            range: Range { start: Position { line: 4, character: 2 }, end: Position { line: 4, character: 6 } },
+            range: Range {
+                start: Position {
+                    line: 4,
+                    character: 2,
+                },
+                end: Position {
+                    line: 4,
+                    character: 6,
+                },
+            },
         };
         let out = OutputFormat::Json.definition(&[loc]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -231,7 +284,16 @@ mod tests {
     fn markdown_reference_numbers_entries() {
         let loc = Location {
             uri: "file:///a.rs".into(),
-            range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 0 } },
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
         };
         let out = OutputFormat::Markdown.reference(&[loc.clone(), loc]);
         assert!(out.starts_with("1. /a.rs:1"));

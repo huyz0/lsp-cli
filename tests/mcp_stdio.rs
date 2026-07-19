@@ -11,7 +11,8 @@ fn send(stdin: &mut impl Write, req: serde_json::Value) {
 fn recv(reader: &mut impl BufRead) -> serde_json::Value {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap_or_else(|e| panic!("invalid JSON-RPC line: {e}\nline: {line}"))
+    serde_json::from_str(&line)
+        .unwrap_or_else(|e| panic!("invalid JSON-RPC line: {e}\nline: {line}"))
 }
 
 #[test]
@@ -27,11 +28,17 @@ fn mcp_server_lists_tools_over_stdio() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
 
-    send(&mut stdin, serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}));
+    send(
+        &mut stdin,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    );
     let init = recv(&mut reader);
     assert_eq!(init["result"]["serverInfo"]["name"], "lsp-cli");
 
-    send(&mut stdin, serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}));
+    send(
+        &mut stdin,
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    );
     let list = recv(&mut reader);
     let tools = list["result"]["tools"].as_array().unwrap();
     assert!(!tools.is_empty());
@@ -55,7 +62,10 @@ fn mcp_server_executes_tool_over_stdio() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
 
-    send(&mut stdin, serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}));
+    send(
+        &mut stdin,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    );
     recv(&mut reader);
 
     send(

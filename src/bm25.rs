@@ -76,11 +76,26 @@ fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
     match ext {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => PATTERNS.ts_js.get_or_init(|| {
             vec![
-                (regex::Regex::new(r"^\s*(?:export\s+)?class\s+(\w+)").unwrap(), 5),
-                (regex::Regex::new(r"^\s*(?:export\s+)?interface\s+(\w+)").unwrap(), 11),
-                (regex::Regex::new(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)").unwrap(), 12),
-                (regex::Regex::new(r"^\s*(?:export\s+)?const\s+(\w+)\s*=").unwrap(), 13),
-                (regex::Regex::new(r"^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{").unwrap(), 6),
+                (
+                    regex::Regex::new(r"^\s*(?:export\s+)?class\s+(\w+)").unwrap(),
+                    5,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:export\s+)?interface\s+(\w+)").unwrap(),
+                    11,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)").unwrap(),
+                    12,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:export\s+)?const\s+(\w+)\s*=").unwrap(),
+                    13,
+                ),
+                (
+                    regex::Regex::new(r"^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{").unwrap(),
+                    6,
+                ),
             ]
         }),
         "py" | "pyi" => PATTERNS.py.get_or_init(|| {
@@ -91,22 +106,43 @@ fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
         }),
         "go" => PATTERNS.go.get_or_init(|| {
             vec![
-                (regex::Regex::new(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)").unwrap(), 12),
+                (
+                    regex::Regex::new(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)").unwrap(),
+                    12,
+                ),
                 (regex::Regex::new(r"^\s*type\s+(\w+)\s+struct").unwrap(), 23),
             ]
         }),
         "rs" => PATTERNS.rs.get_or_init(|| {
             vec![
                 (regex::Regex::new(r"^\s*(?:pub\s+)?fn\s+(\w+)").unwrap(), 12),
-                (regex::Regex::new(r"^\s*(?:pub\s+)?struct\s+(\w+)").unwrap(), 23),
-                (regex::Regex::new(r"^\s*(?:pub\s+)?enum\s+(\w+)").unwrap(), 10),
-                (regex::Regex::new(r"^\s*(?:pub\s+)?trait\s+(\w+)").unwrap(), 11),
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?struct\s+(\w+)").unwrap(),
+                    23,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?enum\s+(\w+)").unwrap(),
+                    10,
+                ),
+                (
+                    regex::Regex::new(r"^\s*(?:pub\s+)?trait\s+(\w+)").unwrap(),
+                    11,
+                ),
             ]
         }),
         "java" | "kt" => PATTERNS.java_kt.get_or_init(|| {
             vec![
-                (regex::Regex::new(r"^\s*(?:public\s+|private\s+)?class\s+(\w+)").unwrap(), 5),
-                (regex::Regex::new(r"^\s*(?:public\s+|private\s+)?(?:static\s+)?\w+\s+(\w+)\s*\([^)]*\)\s*\{").unwrap(), 6),
+                (
+                    regex::Regex::new(r"^\s*(?:public\s+|private\s+)?class\s+(\w+)").unwrap(),
+                    5,
+                ),
+                (
+                    regex::Regex::new(
+                        r"^\s*(?:public\s+|private\s+)?(?:static\s+)?\w+\s+(\w+)\s*\([^)]*\)\s*\{",
+                    )
+                    .unwrap(),
+                    6,
+                ),
             ]
         }),
         _ => &[],
@@ -135,8 +171,14 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
                         location: Location {
                             uri: uri.clone(),
                             range: Range {
-                                start: Position { line: i as u32, character: col },
-                                end: Position { line: i as u32, character: col + m.as_str().len() as u32 },
+                                start: Position {
+                                    line: i as u32,
+                                    character: col,
+                                },
+                                end: Position {
+                                    line: i as u32,
+                                    character: col + m.as_str().len() as u32,
+                                },
                             },
                         },
                         container_name: None,
@@ -174,14 +216,23 @@ impl Bm25Index {
             if !entry.file_type().is_file() {
                 continue;
             }
-            let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             if !SOURCE_EXTS.contains(&ext) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(entry.path()) else { continue };
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
             for sym in extract_symbols(entry.path(), &content) {
                 let tokens = tokenize(&sym.name);
-                docs.push(Doc { tokens, symbol: sym });
+                docs.push(Doc {
+                    tokens,
+                    symbol: sym,
+                });
             }
         }
         Self::from_docs(docs)
@@ -199,8 +250,16 @@ impl Bm25Index {
                 }
             }
         }
-        let avg_len = if docs.is_empty() { 0.0 } else { total_len as f64 / docs.len() as f64 };
-        Self { docs, doc_freq, avg_len }
+        let avg_len = if docs.is_empty() {
+            0.0
+        } else {
+            total_len as f64 / docs.len() as f64
+        };
+        Self {
+            docs,
+            doc_freq,
+            avg_len,
+        }
     }
 
     #[allow(dead_code)]
@@ -259,7 +318,16 @@ mod tests {
             kind: 12,
             location: Location {
                 uri: "file:///a.rs".into(),
-                range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 0 } },
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
             },
             container_name: None,
         }
@@ -278,8 +346,14 @@ mod tests {
     #[test]
     fn ranks_exact_match_above_unrelated() {
         let docs = vec![
-            Doc { tokens: tokenize("computeTotal"), symbol: sym("computeTotal") },
-            Doc { tokens: tokenize("renderWidget"), symbol: sym("renderWidget") },
+            Doc {
+                tokens: tokenize("computeTotal"),
+                symbol: sym("computeTotal"),
+            },
+            Doc {
+                tokens: tokenize("renderWidget"),
+                symbol: sym("renderWidget"),
+            },
         ];
         let idx = Bm25Index::from_docs(docs);
         let results = idx.search("compute total");
@@ -289,7 +363,10 @@ mod tests {
 
     #[test]
     fn empty_query_returns_nothing() {
-        let idx = Bm25Index::from_docs(vec![Doc { tokens: tokenize("foo"), symbol: sym("foo") }]);
+        let idx = Bm25Index::from_docs(vec![Doc {
+            tokens: tokenize("foo"),
+            symbol: sym("foo"),
+        }]);
         assert!(idx.search("").is_empty());
     }
 
@@ -316,7 +393,8 @@ mod tests {
 
     #[test]
     fn extracts_python_class_and_function() {
-        let src = "class User:\n    def greet(self):\n        pass\n\ndef create_user():\n    pass\n";
+        let src =
+            "class User:\n    def greet(self):\n        pass\n\ndef create_user():\n    pass\n";
         let syms = extract_symbols(std::path::Path::new("user.py"), src);
         let found = names(&syms);
         assert!(found.contains(&"User"), "{found:?}");
@@ -355,13 +433,19 @@ mod tests {
 
     #[test]
     fn unrecognized_extension_yields_no_symbols() {
-        let syms = extract_symbols(std::path::Path::new("notes.md"), "# Heading\n\nclass NotReallyCode {}\n");
+        let syms = extract_symbols(
+            std::path::Path::new("notes.md"),
+            "# Heading\n\nclass NotReallyCode {}\n",
+        );
         assert!(syms.is_empty());
     }
 
     #[test]
     fn record_locations_use_the_provided_file_uri() {
-        let syms = extract_symbols(std::path::Path::new("/abs/path/user.rs"), "pub struct User {}\n");
+        let syms = extract_symbols(
+            std::path::Path::new("/abs/path/user.rs"),
+            "pub struct User {}\n",
+        );
         assert_eq!(syms[0].location.uri, "file:///abs/path/user.rs");
     }
 }

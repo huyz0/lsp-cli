@@ -50,7 +50,14 @@ fn markdown_output_contains_source_in_code_block() {
         return;
     }
     let models = ts_fixture("src/models.ts");
-    let result = lsp(&["symbol", models.to_str().unwrap(), "--scope", "User.greet", "--output", "markdown"]);
+    let result = lsp(&[
+        "symbol",
+        models.to_str().unwrap(),
+        "--scope",
+        "User.greet",
+        "--output",
+        "markdown",
+    ]);
     assert_eq!(result.exit_code, 0);
     assert!(result.stdout.contains("```"));
     assert!(result.stdout.contains("greet"));
@@ -64,7 +71,14 @@ fn exits_cleanly_when_no_symbol_at_location() {
     }
     let models = ts_fixture("src/models.ts");
     // Line 3 is a blank line inside the JSDoc — no symbol there.
-    let result = lsp(&["symbol", models.to_str().unwrap(), "--scope", "3", "--output", "json"]);
+    let result = lsp(&[
+        "symbol",
+        models.to_str().unwrap(),
+        "--scope",
+        "3",
+        "--output",
+        "json",
+    ]);
     // Either exit code is acceptable (matches TS test intent) — just must not hang/panic.
     let _ = result.exit_code;
 }

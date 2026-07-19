@@ -29,7 +29,14 @@ fn json_output_has_correct_shape() {
 #[test]
 fn exits_1_when_pattern_not_found() {
     let models = ts_fixture("src/models.ts");
-    let result = lsp(&["locate", models.to_str().unwrap(), "--scope", "1,5", "--find", "DOES_NOT_EXIST_XYZ"]);
+    let result = lsp(&[
+        "locate",
+        models.to_str().unwrap(),
+        "--scope",
+        "1,5",
+        "--find",
+        "DOES_NOT_EXIST_XYZ",
+    ]);
     assert_eq!(result.exit_code, 1);
 }
 

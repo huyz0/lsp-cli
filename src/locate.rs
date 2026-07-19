@@ -7,7 +7,11 @@ pub struct ResolvedPosition {
     pub character: u32,
 }
 
-pub fn resolve_locate(content: &str, scope: Option<&str>, find: Option<&str>) -> Result<ResolvedPosition> {
+pub fn resolve_locate(
+    content: &str,
+    scope: Option<&str>,
+    find: Option<&str>,
+) -> Result<ResolvedPosition> {
     let lines: Vec<&str> = content.split('\n').collect();
 
     let mut find = find.map(|s| s.to_string());
@@ -33,7 +37,11 @@ fn resolve_scope(scope: Option<&str>, lines: &[&str]) -> Result<(usize, usize)> 
     if let Some(caps) = Regex::new(r"^(\d+),(\d+)$").unwrap().captures(scope) {
         let start: i64 = caps[1].parse::<i64>()? - 1;
         let raw_end: i64 = caps[2].parse()?;
-        let end = if raw_end == 0 { lines.len() as i64 - 1 } else { raw_end - 1 };
+        let end = if raw_end == 0 {
+            lines.len() as i64 - 1
+        } else {
+            raw_end - 1
+        };
         let start = start.max(0) as usize;
         let end = (end.min(lines.len() as i64 - 1)).max(0) as usize;
         return Ok((start, end));
@@ -60,8 +68,13 @@ fn resolve_symbol_path(symbol_path: &str, lines: &[&str]) -> Result<(usize, usiz
     }
 
     let nested_name = parts[1..].join(".");
-    let nested_line = find_symbol_definition(&nested_name, lines, first_line + 1, lines.len().saturating_sub(1))
-        .ok_or_else(|| anyhow!("Nested symbol not found: {nested_name} within {first_name}"))?;
+    let nested_line = find_symbol_definition(
+        &nested_name,
+        lines,
+        first_line + 1,
+        lines.len().saturating_sub(1),
+    )
+    .ok_or_else(|| anyhow!("Nested symbol not found: {nested_name} within {first_name}"))?;
 
     Ok((nested_line, lines.len().saturating_sub(1)))
 }
@@ -69,8 +82,14 @@ fn resolve_symbol_path(symbol_path: &str, lines: &[&str]) -> Result<(usize, usiz
 fn find_symbol_definition(name: &str, lines: &[&str], start: usize, end: usize) -> Option<usize> {
     let esc = regex::escape(name);
     let patterns = [
-        Regex::new(&format!(r"(?:class|function|const|let|var|interface|type|enum)\s+{esc}\b")).unwrap(),
-        Regex::new(&format!(r"\b{esc}\s*(?:\(|=\s*(?:function|async function|\(|\())")).unwrap(),
+        Regex::new(&format!(
+            r"(?:class|function|const|let|var|interface|type|enum)\s+{esc}\b"
+        ))
+        .unwrap(),
+        Regex::new(&format!(
+            r"\b{esc}\s*(?:\(|=\s*(?:function|async function|\(|\())"
+        ))
+        .unwrap(),
         Regex::new(&format!(r"(?:def|class)\s+{esc}\b")).unwrap(),
         Regex::new(&format!(r"(?:func|type)\s+{esc}\b")).unwrap(),
     ];
@@ -87,11 +106,19 @@ fn find_symbol_definition(name: &str, lines: &[&str], start: usize, end: usize) 
     None
 }
 
-fn resolve_position(lines: &[&str], start_line: usize, end_line: usize, find: Option<&str>) -> Result<ResolvedPosition> {
+fn resolve_position(
+    lines: &[&str],
+    start_line: usize,
+    end_line: usize,
+    find: Option<&str>,
+) -> Result<ResolvedPosition> {
     let Some(find) = find else {
         let line_str = lines.get(start_line).copied().unwrap_or("");
         let character = line_str.find(|c: char| !c.is_whitespace()).unwrap_or(0);
-        return Ok(ResolvedPosition { line: start_line as u32, character: character as u32 });
+        return Ok(ResolvedPosition {
+            line: start_line as u32,
+            character: character as u32,
+        });
     };
 
     let cursor_marker = "<|>";
@@ -104,11 +131,19 @@ fn resolve_position(lines: &[&str], start_line: usize, end_line: usize, find: Op
         let normalized_line = normalize_whitespace(line);
         if normalized_line.contains(&normalized_pattern) {
             let character = find_character_offset(line, &pattern_without_cursor, cursor_idx);
-            return Ok(ResolvedPosition { line: i as u32, character: character as u32 });
+            return Ok(ResolvedPosition {
+                line: i as u32,
+                character: character as u32,
+            });
         }
     }
 
-    bail!("Pattern not found in scope lines {}-{}: {:?}", start_line + 1, end_line + 1, find);
+    bail!(
+        "Pattern not found in scope lines {}-{}: {:?}",
+        start_line + 1,
+        end_line + 1,
+        find
+    );
 }
 
 fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<usize>) -> usize {
@@ -134,7 +169,9 @@ fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<
         let oc_ws = oc.is_whitespace();
 
         if pc_ws && oc_ws {
-            while pat_idx < pattern_before_cursor_chars && pat.get(pat_idx).map(|c| c.is_whitespace()).unwrap_or(false) {
+            while pat_idx < pattern_before_cursor_chars
+                && pat.get(pat_idx).map(|c| c.is_whitespace()).unwrap_or(false)
+            {
                 pat_idx += 1;
             }
             while orig_idx < orig.len() && orig[orig_idx].is_whitespace() {
@@ -148,7 +185,9 @@ fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<
                 orig_idx += 1;
             }
         } else {
-            while pat_idx < pattern_before_cursor_chars && pat.get(pat_idx).map(|c| c.is_whitespace()).unwrap_or(false) {
+            while pat_idx < pattern_before_cursor_chars
+                && pat.get(pat_idx).map(|c| c.is_whitespace()).unwrap_or(false)
+            {
                 pat_idx += 1;
             }
         }
@@ -164,7 +203,9 @@ fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<
 fn find_match_start_in_original(original_line: &str, pattern: &str) -> usize {
     let normalized_line = normalize_whitespace(original_line);
     let normalized_pattern = normalize_whitespace(pattern);
-    let Some(norm_match_start) = normalized_line.find(&normalized_pattern) else { return 0 };
+    let Some(norm_match_start) = normalized_line.find(&normalized_pattern) else {
+        return 0;
+    };
     // find() gives a byte offset into normalized_line; convert to char offset first
     let norm_char_offset = normalized_line[..norm_match_start].chars().count();
     map_normalized_offset(original_line, norm_char_offset)
@@ -231,7 +272,10 @@ mod tests {
         assert_eq!(pos.line, 2);
         // cursor sits right before the "1" in "return 1;"
         let line = SAMPLE.split('\n').nth(2).unwrap();
-        assert_eq!(&line[pos.character as usize..pos.character as usize + 1], "1");
+        assert_eq!(
+            &line[pos.character as usize..pos.character as usize + 1],
+            "1"
+        );
     }
 
     #[test]

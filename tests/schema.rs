@@ -21,7 +21,11 @@ fn schema_for_specific_command() {
     assert!(data["properties"].get("file").is_some());
     assert!(data["properties"].get("all").is_some());
     assert!(data["properties"].get("scope").is_some());
-    assert!(data["required"].as_array().unwrap().iter().any(|v| v == "file"));
+    assert!(data["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "file"));
 }
 
 #[test]

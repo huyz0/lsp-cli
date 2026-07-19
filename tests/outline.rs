@@ -10,7 +10,12 @@ fn returns_symbol_tree_for_typescript_file() {
     let models = ts_fixture("src/models.ts");
     let data = lsp_json(&["outline", models.to_str().unwrap()]);
     assert_eq!(data["kind"], "outline");
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"User"), "expected User in {names:?}");
 }
 
@@ -22,8 +27,16 @@ fn all_flag_includes_interface_symbols() {
     }
     let models = ts_fixture("src/models.ts");
     let data = lsp_json(&["outline", models.to_str().unwrap(), "--all"]);
-    let names: Vec<&str> = data["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"UserOptions"), "expected UserOptions in {names:?}");
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"UserOptions"),
+        "expected UserOptions in {names:?}"
+    );
 }
 
 #[test]

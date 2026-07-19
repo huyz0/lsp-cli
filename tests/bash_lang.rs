@@ -8,7 +8,14 @@ fn doc_returns_hover_for_function_call() {
         return;
     }
     let main_sh = bash_fixture("main.sh");
-    let data = lsp_json(&["doc", main_sh.to_str().unwrap(), "--scope", "6", "--find", "<|>greet"]);
+    let data = lsp_json(&[
+        "doc",
+        main_sh.to_str().unwrap(),
+        "--scope",
+        "6",
+        "--find",
+        "<|>greet",
+    ]);
     assert_eq!(data["kind"], "hover");
     assert!(data["content"].as_str().unwrap().contains("greet"));
 }
@@ -20,7 +27,14 @@ fn reference_finds_function_call_site() {
         return;
     }
     let main_sh = bash_fixture("main.sh");
-    let data = lsp_json(&["reference", main_sh.to_str().unwrap(), "--scope", "2", "--find", "<|>greet"]);
+    let data = lsp_json(&[
+        "reference",
+        main_sh.to_str().unwrap(),
+        "--scope",
+        "2",
+        "--find",
+        "<|>greet",
+    ]);
     assert_eq!(data["kind"], "reference");
     let locations = data["locations"].as_array().unwrap();
     assert!(!locations.is_empty());
