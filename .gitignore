@@ -1,0 +1,15 @@
+/target
+**/node_modules
+**/package-lock.json
+tests/fixtures/rust_project/target
+tests/fixtures/rust_project/Cargo.lock
+
+# Left behind by gated integration tests actually running a language server
+# against a fixture project (jdtls workspace state, csharp-ls build output,
+# ruby-lsp's composed bundle) — see docs/language-support.md.
+tests/fixtures/java_project/.metadata
+tests/fixtures/java_project/jdt.ls-java-project/bin
+tests/fixtures/csharp_project/bin
+tests/fixtures/csharp_project/obj
+tests/fixtures/ruby_project/.ruby-lsp
+tests/fixtures/kotlin_project/.gradle

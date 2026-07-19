@@ -1,0 +1,4 @@
+[tool.poetry]
+name = "lsp-cli-python-fixture"
+version = "0.1.0"
+description = "Python fixture for lsp-cli integration tests"

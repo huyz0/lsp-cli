@@ -1,0 +1,8 @@
+{
+  "name": "lsp-cli-ts-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "typescript": "^5.9.3"
+  }
+}
