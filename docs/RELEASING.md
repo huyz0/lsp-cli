@@ -50,5 +50,5 @@ release published.
 [`install.sh`](../install.sh) downloads the right release asset directly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli/main/install.sh | sh
 ```

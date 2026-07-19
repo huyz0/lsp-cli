@@ -35,11 +35,11 @@ brew install huyz0/tap/lsp-cli
 **No package manager:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli/main/install.sh | sh
 ```
 
 Or grab a prebuilt binary directly from
-[Releases](https://github.com/huyz0/lsp-cli-rust/releases): each release
+[Releases](https://github.com/huyz0/lsp-cli/releases): each release
 includes a `checksums.txt` so you can verify what you downloaded with
 `sha256sum -c checksums.txt` before running it.
 
@@ -47,8 +47,8 @@ Alternatively, build from source (requires a
 [Rust toolchain](https://rustup.rs)):
 
 ```bash
-git clone https://github.com/huyz0/lsp-cli-rust
-cd lsp-cli-rust
+git clone https://github.com/huyz0/lsp-cli
+cd lsp-cli
 cargo build --release
 ./target/release/lsp --help
 ```

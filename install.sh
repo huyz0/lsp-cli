@@ -2,7 +2,7 @@
 # Downloads the latest lsp-cli release for this machine's OS/arch and
 # installs the `lsp` binary to $INSTALL_DIR (default ~/.local/bin).
 #
-#   curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli/main/install.sh | sh
 #
 # Prefer `brew install huyz0/tap/lsp-cli` if you have Homebrew — this
 # script is the no-package-manager fallback (mirrors what rustup/eget-style
@@ -10,7 +10,7 @@
 # Unix Domain Socket-only today, so there's no Windows build to fetch.
 set -eu
 
-REPO="huyz0/lsp-cli-rust"
+REPO="huyz0/lsp-cli"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 os=$(uname -s)

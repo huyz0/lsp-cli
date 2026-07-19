@@ -44,7 +44,7 @@ working Bundler plus a writable gem/bundle path. The system gem directory
 usually isn't writable by a non-root user, and installing a native gem
 extension (`psych`) needs the `libyaml` headers. Without root, or with an
 unprivileged gem setup, this fails partway through in a way that looks like
-a broken `lsp-cli-rust` integration but isn't:
+a broken `lsp-cli` integration but isn't:
 
 ```bash
 sudo apt install -y libyaml-dev   # or your distro's libyaml headers package

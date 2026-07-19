@@ -20,16 +20,16 @@ If missing, install it:
 brew install huyz0/tap/lsp-cli
 
 # no package manager
-curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli-rust/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli/main/install.sh | sh
 
 # or download a prebuilt binary directly from
-# https://github.com/huyz0/lsp-cli-rust/releases
+# https://github.com/huyz0/lsp-cli/releases
 ```
 
 Or build it from source:
 
 ```bash
-cargo install --path <path-to-lsp-cli-rust>
+cargo install --path <path-to-lsp-cli>
 # or, from inside the repo:
 cargo build --release   # binary at ./target/release/lsp
 ```
