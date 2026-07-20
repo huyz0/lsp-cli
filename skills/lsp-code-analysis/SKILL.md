@@ -163,6 +163,20 @@ lsp search "User" --max-items 20 --start-index 0 --pagination-id s1
 
 Kind values: `class`, `interface`, `function`, `method`, `variable`, `constant`, `enum`, `struct`
 
+**In a multi-project workspace** (a monorepo with several independent
+projects, same stack or mixed), run `search` from inside the specific
+project you care about, or pass `--project <path>`, not the workspace
+root. It auto-detects one project from the current directory and queries
+that project's real LSP server; from a workspace root with no project of
+its own, that detection typically finds nothing and it silently falls back
+to a text-based index built across every file in every subproject, mixed
+languages included, which is fine for a rough lookup but loses LSP
+precision (exact symbol matches, not just name matches). File-scoped
+commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `calls`,
+`diagnostics`) don't have this problem: point one at any file and it
+auto-resolves the correct project and language server from that file's
+own location, regardless of how many other projects share the workspace.
+
 ### `lsp locate <file> --scope <scope>`
 
 Verify that a scope+find pattern resolves correctly before using it in other commands. Runs purely locally: no LSP server, no daemon, no network. Use this whenever `--find` isn't matching what you expect, instead of debugging by trial and error against the LSP commands.
