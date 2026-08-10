@@ -118,8 +118,8 @@ constant.
 ## Automatic language server installation (`src/install.rs`)
 
 Every language except `deno` is auto-installable, including Java. `json`,
-`css`, and `html` are bundled (see "Bundled Rust-native servers" below, no
-download at all); `typescript`/`python`/`bash` run `npm
+`css`, `html`, and `bash` are bundled (see "Bundled Rust-native servers"
+below, no download at all); `typescript`/`python` run `npm
 install <package>` into `~/.lsp-cli/packages/` and write a `#!/bin/sh`
 wrapper into `~/.lsp-cli/servers/` that execs `node <entry> "$@"`; `go`
 runs `go install golang.org/x/tools/gopls@latest` into an isolated
@@ -161,25 +161,25 @@ release process today).
 ## Bundled Rust-native servers (`src/servers/`)
 
 Most managed languages proxy to a third-party server this tool downloads or
-npm-installs. JSON, CSS, and HTML are the exceptions so far: `lsp-json-lsp`
-(`src/servers/json_lsp.rs`), `lsp-css-lsp` (`src/servers/css_lsp.rs`), and
-`lsp-html-lsp` (`src/servers/html_lsp.rs`) are real LSP servers written for
-this project, each compiled as a sibling binary of `lsp` itself via its own
-`[[bin]]` entry in `Cargo.toml`. `cargo build --release` produces
-`target/release/lsp` and every `lsp-<lang>-lsp` binary in one shot, and
-every release archive ships all of them (packaging globs `lsp-*-lsp` rather
-than naming each one, so adding another bundled server doesn't need
-another edit to release.yml/install.sh/the Homebrew formula generator), so
-"installing" one of these servers is just confirming that sibling binary
-is present next to `lsp`, no network, no npm, no Node.js runtime.
+npm-installs. JSON, CSS, HTML, and Bash are the exceptions so far:
+`lsp-json-lsp`, `lsp-css-lsp`, `lsp-html-lsp`, and `lsp-bash-lsp` (all under
+`src/servers/`) are real LSP servers written for this project, each
+compiled as a sibling binary of `lsp` itself via its own `[[bin]]` entry in
+`Cargo.toml`. `cargo build --release` produces `target/release/lsp` and
+every `lsp-<lang>-lsp` binary in one shot, and every release archive ships
+all of them (packaging globs `lsp-*-lsp` rather than naming each one, so
+adding another bundled server doesn't need another edit to
+release.yml/install.sh/the Homebrew formula generator), so "installing" one
+of these servers is just confirming that sibling binary is present next to
+`lsp`, no network, no npm, no Node.js runtime.
 `registry::is_bundled_server` recognizes any `lsp-<lang>-lsp` binary name,
 and `registry::server_path` resolves it relative to
 `std::env::current_exe()`'s own directory, the same special-case treatment
 `deno` gets for resolving via `PATH` instead of the download-managed
 `install_dir`.
 
-HTML is the one that exists to fix a real bug, not just drop a runtime
-dependency: the npm-installed `vscode-html-language-server` this tool used
+HTML and Bash both exist to fix a real bug, not just drop a runtime
+dependency. The npm-installed `vscode-html-language-server` this tool used
 before returns *flat* `SymbolInformation[]` instead of hierarchical
 `DocumentSymbol[]` for documentSymbol, so outline always came back empty
 for HTML, a genuine, previously-unfixable-from-the-client-side server
@@ -191,21 +191,40 @@ matching how browser devtools name elements. Void elements (`<img>`,
 them the same way as any other element, just without an `end_tag` or
 children; `<script>`/`<style>` are distinct grammar node kinds
 (`script_element`/`style_element`) whose body is one opaque `raw_text`
-node, deliberately left unparsed rather than treated as nested HTML.
+node, deliberately left unparsed rather than treated as nested HTML. The
+old `bash-language-server` had the same empty-documentSymbol problem;
+`lsp-bash-lsp` fixes it too, and unifies both `name() { ... }` and
+`function name { ... }` definition syntaxes to the same symbol shape
+(`tree-sitter-bash` already parses them identically).
+
+Bash is also the one server in this set that goes beyond
+documentSymbol/hover: the old `bash-language-server` had working
+`definition`/`references`, and dropping them just to gain outline would
+have been a net regression rather than a win. Bash scripts are effectively
+single-file in scope, no cross-file module system to resolve, which makes
+a whole-document name index (`bash_lsp.rs::Index`, function definitions,
+function calls, variable assignments, variable expansions, each keyed by
+name) tractable to build fresh per request; `definition`/`references` are
+then direct index lookups. One honest capability regression that comes
+with rebuilding this from scratch: hover just shows the raw token text at
+the cursor, not real builtin documentation the way
+`bash-language-server`'s hover on a builtin like `echo` used to (that data
+source doesn't exist here).
 
 Built on two crates rust-analyzer itself uses for the server side of the
 protocol: `lsp-server` (JSON-RPC-over-stdio framing and the request/
 notification dispatch loop; `src/lsp_client.rs` elsewhere in this codebase
 only ever implements the *client* side) and `lsp-types` (the protocol's
 type definitions). Parsing is `tree-sitter-<lang>` per server (`-json`,
-`-css`, `-html`), the same incremental, editor-oriented grammar approach
-intended for every server under `src/servers/`.
+`-css`, `-html`, `-bash`), the same incremental, editor-oriented grammar
+approach intended for every server under `src/servers/`.
 
 Scope is deliberately narrow per server: `textDocument/documentSymbol` (a
-real hierarchical outline in every case, unlike the flat list the old HTML
-server returned, since this tool controls both ends of the protocol here)
-and a minimal `textDocument/hover`. No diagnostics, no completion, no
-schema/property-value/attribute-value validation.
+real hierarchical outline in every case, unlike the flat/empty results the
+old HTML and Bash servers returned, since this tool controls both ends of
+the protocol here) and a minimal `textDocument/hover`, plus
+`definition`/`references` for Bash specifically. No diagnostics, no
+completion, no schema/property-value/attribute-value validation.
 
 Two things worth knowing before adding another one of these:
 

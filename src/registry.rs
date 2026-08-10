@@ -140,8 +140,16 @@ pub fn languages() -> &'static [LanguageConfig] {
             name: "bash",
             extensions: &[".sh", ".bash"],
             root_markers: &[],
-            server_bin: "bash-language-server",
-            server_args: |_| vec!["start".to_string()],
+            // Rust-native, bundled as a sibling binary of `lsp` itself
+            // (see Cargo.toml's `[[bin]]` entries and
+            // src/servers/bash_lsp.rs) rather than downloaded/npm-installed
+            // — no `start` subcommand or `--stdio` flag, it only ever
+            // speaks stdio. Also fixes a real gap the old
+            // bash-language-server had: it returned an empty
+            // documentSymbol list for real scripts, so outline never
+            // showed anything (see docs/language-support.md).
+            server_bin: "lsp-bash-lsp",
+            server_args: |_| vec![],
         },
         LanguageConfig {
             name: "html",

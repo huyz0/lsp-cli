@@ -126,7 +126,7 @@ pub fn has_zls() -> bool {
 }
 
 pub fn has_bash_language_server() -> bool {
-    has_server("bash-language-server") || has_binary("bash-language-server")
+    has_bundled_server("lsp-bash-lsp")
 }
 
 pub fn has_csharp_ls() -> bool {

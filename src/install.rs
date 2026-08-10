@@ -1,5 +1,5 @@
 //! Automatic language server installation. npm-installed servers
-//! (typescript, python, bash) get a thin shell wrapper into
+//! (typescript, python) get a thin shell wrapper into
 //! `~/.lsp-cli/servers/<bin>` that execs `node <entry> "$@"`; gopls is
 //! `go install`ed into an isolated GOPATH and symlinked in; rust-analyzer,
 //! kotlin-language-server, clangd, lua-language-server, and zls are fetched
@@ -8,11 +8,11 @@
 //! sdkman/`JAVA_HOME`/`PATH` (installing a JDK itself is out of scope —
 //! it's a much bigger, more opinionated dependency than any other managed
 //! server); csharp-ls and ruby-lsp go through `dotnet tool install`/`gem
-//! install` respectively. json, css, and html are Rust-native, bundled
-//! servers (see src/servers/) shipped as sibling binaries of `lsp` itself,
-//! so "installing" one is just confirming that binary is present, no
-//! download/npm/network involved at all. deno remains unmanaged since it
-//! relies on the `deno` binary already being on `PATH`.
+//! install` respectively. json, css, html, and bash are Rust-native,
+//! bundled servers (see src/servers/) shipped as sibling binaries of `lsp`
+//! itself, so "installing" one is just confirming that binary is present,
+//! no download/npm/network involved at all. deno remains unmanaged since
+//! it relies on the `deno` binary already being on `PATH`.
 
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
@@ -105,8 +105,8 @@ fn run_binary_version(bin: &Path, args: &[&str]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// typescript, python, html/css, bash — all npm packages with
-// a node-script entry point, wrapped identically.
+// typescript, python — the last two npm packages with a
+// node-script entry point, wrapped identically.
 // ---------------------------------------------------------------------------
 
 struct NpmSpec {
@@ -137,13 +137,6 @@ fn npm_spec(language: &str) -> Option<NpmSpec> {
             wrapper_name: "basedpyright-langserver",
             version_args: &["--version"],
             version_entry_rel: Some("node_modules/basedpyright/index.js"),
-        },
-        "bash" => NpmSpec {
-            packages: &["bash-language-server"],
-            entry_rel: "node_modules/bash-language-server/out/cli.js",
-            wrapper_name: "bash-language-server",
-            version_args: &["--version"],
-            version_entry_rel: None,
         },
         _ => return None,
     })
@@ -1013,6 +1006,7 @@ async fn install_language(language: &str) -> Result<PathBuf> {
         "json" => install_bundled_server("lsp-json-lsp"),
         "css" => install_bundled_server("lsp-css-lsp"),
         "html" => install_bundled_server("lsp-html-lsp"),
+        "bash" => install_bundled_server("lsp-bash-lsp"),
         other => bail!(
             "Unknown language: {other}\nSupported: {}",
             MANAGED_LANGUAGES.join(", ")
@@ -1037,6 +1031,7 @@ fn check_version(language: &str) -> Option<String> {
         "json" => check_bundled_server_version("lsp-json-lsp"),
         "css" => check_bundled_server_version("lsp-css-lsp"),
         "html" => check_bundled_server_version("lsp-html-lsp"),
+        "bash" => check_bundled_server_version("lsp-bash-lsp"),
         _ => None,
     }
 }
@@ -1241,6 +1236,7 @@ mod tests {
                     | "json"
                     | "css"
                     | "html"
+                    | "bash"
             );
             assert!(
                 has_npm_spec || has_explicit_arm,

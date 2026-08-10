@@ -96,7 +96,7 @@ yourself. `lsp server list` shows what's running.
 | C / C++ | ✅ (`clangd`, GitHub release) | Full support. |
 | Lua | ✅ (GitHub release) | Full support. |
 | Zig | ✅ (`zls`, GitHub release) | Full support. |
-| Bash / shell | ✅ (npm) | Everything except outline. `bash-language-server`'s document-symbol support is minimal and returns nothing for typical scripts; definition/reference/doc all work. |
+| Bash / shell | ✅ bundled, no install step | Outline (functions), definition, and reference, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). `doc`/hover shows the raw token text, not real builtin documentation like the previous npm server's did. |
 | C# | ✅ (`csharp-ls` via `dotnet tool install`) | Full support. Requires the .NET SDK on `PATH`. |
 | Ruby | ✅ (`ruby-lsp` via `gem install`) | Full support, verified live. `ruby-lsp` composes a Bundler-managed bundle on startup, which needs a working user-writable Bundler/gem setup (and `libyaml-dev` for the `psych` gem); see [CONTRIBUTING.md](CONTRIBUTING.md#ruby-ruby-lsp) for the one-time host setup. |
 | Deno | Detected on `PATH`, not installed | Full support once `deno` is on `PATH`. Install it yourself from [deno.land](https://deno.land). |
