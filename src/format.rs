@@ -1,5 +1,6 @@
 use crate::protocol::{
     symbol_kind_name, CallHierarchyItem, Diagnostic, DocumentSymbol, HoverResult, Location,
+    TextEdit, TypeHierarchyItem,
 };
 use serde_json::json;
 
@@ -242,6 +243,93 @@ impl OutputFormat {
         match self {
             OutputFormat::Json => json!({"kind": "error", "message": message}).to_string(),
             OutputFormat::Markdown => format!("Error: {message}"),
+        }
+    }
+
+    pub fn hierarchy(&self, direction: &str, items: &[TypeHierarchyItem]) -> String {
+        match self {
+            OutputFormat::Json => json!({
+                "kind": "hierarchy",
+                "direction": direction,
+                "items": items.iter().map(|i| json!({
+                    "name": i.name,
+                    "symbolKind": symbol_kind_name(i.kind),
+                    "detail": i.detail,
+                    "uri": uri_to_path(&i.uri),
+                    "line": i.selection_range.start.line + 1,
+                    "character": i.selection_range.start.character,
+                })).collect::<Vec<_>>()
+            })
+            .to_string(),
+            OutputFormat::Markdown => {
+                if items.is_empty() {
+                    return format!("No {direction} found.");
+                }
+                items
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "{} {} — {}:{}",
+                            icon(i.kind),
+                            i.name,
+                            uri_to_path(&i.uri),
+                            i.selection_range.start.line + 1
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    }
+
+    /// `files_with_edits` is `(uri, edits)` pairs collected from a
+    /// `WorkspaceEdit`; `skipped_ops` is the count of `documentChanges`
+    /// entries that were file operations (create/rename/delete a file)
+    /// rather than text edits — this tool only applies text edits, so a
+    /// nonzero count here means the rename is incomplete even when
+    /// `applied` is true, and callers must be told that explicitly rather
+    /// than have it look like a clean success.
+    pub fn rename(
+        &self,
+        new_name: &str,
+        applied: bool,
+        files_with_edits: &[(String, Vec<TextEdit>)],
+        skipped_ops: usize,
+    ) -> String {
+        let edit_count: usize = files_with_edits.iter().map(|(_, e)| e.len()).sum();
+        match self {
+            OutputFormat::Json => json!({
+                "kind": "rename",
+                "newName": new_name,
+                "applied": applied,
+                "editCount": edit_count,
+                "skippedOperations": skipped_ops,
+                "files": files_with_edits.iter().map(|(uri, edits)| json!({
+                    "uri": uri_to_path(uri),
+                    "editCount": edits.len(),
+                })).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            OutputFormat::Markdown => {
+                if files_with_edits.is_empty() {
+                    return "No rename edits.".to_string();
+                }
+                let mut out = files_with_edits
+                    .iter()
+                    .map(|(uri, edits)| format!("{} — {} edit(s)", uri_to_path(uri), edits.len()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                out.push('\n');
+                out.push_str(&if applied {
+                    format!("Applied {edit_count} edit(s) across {} file(s), renamed to `{new_name}`.", files_with_edits.len())
+                } else {
+                    format!("Preview only ({edit_count} edit(s) across {} file(s)) — pass --apply to write these changes.", files_with_edits.len())
+                });
+                if skipped_ops > 0 {
+                    out.push_str(&format!("\n{skipped_ops} file operation(s) (create/rename/delete) were NOT applied — this rename is incomplete."));
+                }
+                out
+            }
         }
     }
 }

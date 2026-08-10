@@ -65,8 +65,10 @@ lsp outline src/models.ts                    # file structure, no full read need
 lsp definition src/service.ts --scope createUser
 lsp reference src/models.ts --scope User
 lsp calls src/service.ts --scope createUser   # who calls this / what does this call
+lsp hierarchy src/models.ts --scope User      # what extends/implements this
 lsp diagnostics src/service.ts                # compiler/type errors
 lsp search "User" --kinds class               # find a symbol workspace-wide
+lsp rename src/models.ts --scope User.greet --new-name sayHello --apply  # rename across every file
 ```
 
 Every command supports `--output json` (default) or `--output markdown`,
@@ -82,7 +84,7 @@ yourself. `lsp server list` shows what's running.
 
 | Language | Auto-install | Notes |
 |---|---|---|
-| TypeScript / JavaScript | ✅ | Full support (outline, definition, reference, doc, symbol, calls, diagnostics, search). |
+| TypeScript / JavaScript | ✅ | Full support (outline, definition, reference, doc, symbol, calls, diagnostics, search, rename). `hierarchy` (type hierarchy) isn't supported by `typescript-language-server` itself (`textDocument/prepareTypeHierarchy` is unhandled) — the error surfaces cleanly, this isn't a bug in this tool. |
 | Python | ✅ (basedpyright) | Full support. |
 | Go | ✅ (`go install`) | Full support. |
 | Rust | ✅ (GitHub release) | Full support. |

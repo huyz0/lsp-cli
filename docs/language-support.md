@@ -6,10 +6,10 @@ locally to run the gated tests referenced below.
 
 | Language | Server | Status |
 |---|---|---|
-| TypeScript | `typescript-language-server` + local `typescript` | ✅ outline/definition/reference/doc/symbol/search, `tests/{outline,definition,reference,doc,symbol,search,calls,diagnostics}.rs` |
+| TypeScript | `typescript-language-server` + local `typescript` | ✅ outline/definition/reference/doc/symbol/search/calls/diagnostics/rename, `tests/{outline,definition,reference,doc,symbol,search,calls,diagnostics}.rs`. `hierarchy` is not supported by this server (`textDocument/prepareTypeHierarchy` is unhandled, confirmed live) — it fails with a clean error rather than a bug in this tool. Note: `typescript@7.x` (the new Go-based compiler) restructured its package layout in a way the server doesn't understand yet ("Could not find a valid TypeScript installation"); use `typescript@5.x` in the project's own `node_modules` if hitting that. |
 | Python | `basedpyright-langserver` (npm) | ✅ outline/definition/reference/doc, `tests/python.rs` |
-| Go | `gopls` (`go install golang.org/x/tools/gopls@latest`) | ✅ outline/definition/doc, `tests/go_lang.rs` |
-| Rust | `rust-analyzer` (`rustup component add rust-analyzer`) | ✅ outline/definition/doc, `tests/rust_lang.rs` |
+| Go | `gopls` (`go install golang.org/x/tools/gopls@latest`) | ✅ outline/definition/doc, `tests/go_lang.rs`. `hierarchy` (type hierarchy, both subtypes/supertypes) verified live against an interface + two implementing structs. No dedicated rename test yet. |
+| Rust | `rust-analyzer` (`rustup component add rust-analyzer`) | ✅ outline/definition/doc/rename, `tests/rust_lang.rs` (rename verified live including a full `cargo build` of the renamed output). `hierarchy` is not supported by this rust-analyzer version ("unknown request", confirmed live). |
 | CSS | `vscode-css-language-server` (npm `vscode-langservers-extracted`) | ✅ outline/doc, `tests/web.rs` |
 | JSON | `vscode-json-language-server` (same package) | ✅ outline (with `--all`; JSON keys aren't in the default top-level symbol-kind filter), `tests/web.rs` |
 | HTML | `vscode-html-language-server` (same package) | ⚠️ spawns and responds correctly, but returns *flat* `SymbolInformation[]` for `textDocument/documentSymbol` instead of hierarchical `DocumentSymbol[]`. Outline only ever deserializes the hierarchical shape, so it comes back empty. `tests/web.rs` asserts the (empty-but-valid) shape. |
@@ -19,11 +19,23 @@ locally to run the gated tests referenced below.
 | Lua | `lua-language-server` (auto-installable: fetches the latest GitHub Release tar.gz) | ✅ verified live: real `outline` against a file with a local function returned it with its parameter as a nested symbol. No dedicated `tests/*.rs` file yet. |
 | Zig | `zls` (auto-installable: fetches the latest GitHub Release tar.xz, a bare binary at the archive root with no wrapping directory) | ✅ verified live: real `outline` against a `pub fn main` returned it with the correct `fn main() void` signature. No dedicated `tests/*.rs` file yet. |
 | Bash / shell | `bash-language-server` (npm, auto-installable) | ⚠️ `doc`(hover)/`reference`/`definition` verified live and work correctly (hover on `echo` returned the real bash builtin man-page text; reference correctly found a function call site), but `outline` (`textDocument/documentSymbol`) returns an empty list even for a file with a declared function, confirmed live. This appears to be a genuine limitation of this server's document-symbol support rather than anything on this tool's side (its declared LSP capabilities are otherwise complete). No dedicated `tests/*.rs` file yet. |
-| C# | `csharp-ls` (via `dotnet tool install --tool-path`) | ✅ verified live once a .NET SDK was made available: `outline` against a two-class file returned the correct `CsTest` namespace to `Greeter` (field/constructor/method) and `Program` (Main) tree; `definition` on a constructor call resolved correctly; `doc` (hover) returned the correct method signature. No dedicated `tests/*.rs` file yet. |
+| C# | `csharp-ls` (via `dotnet tool install --tool-path`) | ✅ verified live once a .NET SDK was made available: `outline` against a two-class file returned the correct `CsTest` namespace to `Greeter` (field/constructor/method) and `Program` (Main) tree; `definition` on a constructor call resolved correctly; `doc` (hover) returned the correct method signature; `hierarchy` (both subtypes and supertypes) verified live against a base class and two derived classes. `tests/csharp_lang.rs`. |
 | Ruby | `ruby-lsp` (via `gem install --bindir`) | ✅ verified live end-to-end through the real `lsp` CLI/daemon (`outline` and `definition` against `tests/fixtures/ruby_project/greeter.rb` both returned correct results; `doc`/hover returned "no documentation available" for a plain method with no RBS/comment doc, which appears to be expected server behavior rather than a bug). Getting here required fixing the host's Ruby environment, not this tool's code. See [CONTRIBUTING.md#ruby-ruby-lsp](../CONTRIBUTING.md#ruby-ruby-lsp) for the exact steps: `ruby-lsp` always composes a Bundler-managed bundle on startup, which needs (1) Bundler installed via `gem install --user-install` (not the read-only system gem dir), (2) `PATH` including that user gem bin dir so `ruby-lsp` can find `bundle`, (3) `BUNDLE_PATH` pointed at a writable location so the composed bundle doesn't try to install into the system gem cache, and (4) the `libyaml-dev` system package so the `psych` gem's native extension can compile. None of that is something `lsp-cli` can configure on the user's behalf; it's host environment setup. No dedicated `tests/*.rs` file yet (needs the above host setup to pass in CI). |
 | Deno | `deno lsp` (detected on `PATH`, never auto-installed) | ✅ outline/definition/reference/doc all verified against a real `deno` binary. No dedicated fixture/test file yet. |
 
 A real bug was found and fixed while adding C/C++: `install_clangd`'s final step moved (`rename`'d) the extracted directory from the system temp dir into `~/.lsp-cli/servers/`. On a machine where `/tmp` is a different filesystem/mount than the home directory, `rename` across filesystems fails with `EXDEV`, reproduced live. Fixed by extracting directly under `~/.lsp-cli/servers/` (a staging subdirectory on the same filesystem as the final destination) instead of the system temp dir.
+
+`hierarchy` (`textDocument/prepareTypeHierarchy`) support is genuinely
+uneven across servers, confirmed live rather than assumed: `csharp-ls` and
+`gopls` both implement it correctly (verified against a real base
+type/interface with two derived types); `typescript-language-server` and
+this `rust-analyzer` version don't implement it at all and fail with a
+clean, explicit LSP error (`Unhandled method`/`unknown request`) rather
+than a crash or a bug in this tool. `lsp rename` (`textDocument/rename`)
+has been verified against `rust-analyzer` (including a full `cargo build`
+of the renamed output to confirm it still compiles) and
+`typescript-language-server`, both correctly renaming a definition and its
+call site across files.
 
 The language → server-binary/extension/root-marker mapping lives in
 `src/registry.rs`. See [architecture.md](architecture.md) for how it's

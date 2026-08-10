@@ -60,3 +60,58 @@ fn doc_returns_hover_for_method() {
     assert_eq!(data["kind"], "hover");
     assert!(data["content"].as_str().unwrap().contains("Greet"));
 }
+
+#[test]
+fn hierarchy_subtypes_finds_both_derived_classes() {
+    if !has_csharp_ls() {
+        eprintln!("skipping: csharp-ls not installed");
+        return;
+    }
+    let animal = csharp_fixture("Animal.cs");
+    let data = lsp_json(&[
+        "hierarchy",
+        animal.to_str().unwrap(),
+        "--scope",
+        "3",
+        "--find",
+        "class <|>Animal",
+        "--direction",
+        "subtypes",
+    ]);
+    assert_eq!(data["kind"], "hierarchy");
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Dog"), "expected Dog in {names:?}");
+    assert!(names.contains(&"Cat"), "expected Cat in {names:?}");
+}
+
+#[test]
+fn hierarchy_supertypes_finds_base_class() {
+    if !has_csharp_ls() {
+        eprintln!("skipping: csharp-ls not installed");
+        return;
+    }
+    let animal = csharp_fixture("Animal.cs");
+    let data = lsp_json(&[
+        "hierarchy",
+        animal.to_str().unwrap(),
+        "--scope",
+        "8",
+        "--find",
+        "class <|>Dog",
+        "--direction",
+        "supertypes",
+    ]);
+    assert_eq!(data["kind"], "hierarchy");
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Animal"), "expected Animal in {names:?}");
+}

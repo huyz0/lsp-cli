@@ -86,6 +86,24 @@ pub fn schemas() -> Map<String, Value> {
         }),
     );
     out.insert(
+        "hierarchy".into(),
+        json!({
+            "title": "lsp hierarchy", "description": "Find supertypes or subtypes of a class/interface",
+            "type": "object",
+            "properties": merge(&[json!({"file": {"type": "string"}, "direction": {"type": "string", "enum": ["subtypes", "supertypes"]}}), scope_props.clone(), output_props.clone()]),
+            "required": ["file"],
+        }),
+    );
+    out.insert(
+        "rename".into(),
+        json!({
+            "title": "lsp rename", "description": "Rename a symbol across every file that references it. Without \"apply\", only previews the edits.",
+            "type": "object",
+            "properties": merge(&[json!({"file": {"type": "string"}, "new-name": {"type": "string"}, "apply": {"type": "boolean"}}), scope_props.clone(), output_props.clone()]),
+            "required": ["file", "new-name"],
+        }),
+    );
+    out.insert(
         "symbol".into(),
         json!({
             "title": "lsp symbol", "description": "Get the full source code of the symbol at a location",

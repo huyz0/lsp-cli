@@ -202,6 +202,60 @@ enum Commands {
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
+    /// Find supertypes or subtypes of a class/interface
+    ///
+    /// Requires --scope to select the symbol. Uses LSP type hierarchy
+    /// (textDocument/prepareTypeHierarchy + typeHierarchy/subtypes|
+    /// supertypes) — subtypes answers "what extends/implements this",
+    /// supertypes answers "what does this extend/implement".
+    #[command(alias = "th")]
+    Hierarchy {
+        file: String,
+        /// One of: subtypes (default — what extends/implements this), supertypes (what this extends/implements).
+        #[arg(long, default_value = "subtypes")]
+        direction: String,
+        #[arg(long, help = SCOPE_HELP)]
+        scope: Option<String>,
+        #[arg(long, help = FIND_HELP)]
+        find: Option<String>,
+        #[arg(short, long, help = PROJECT_HELP)]
+        project: Option<String>,
+        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
+        output: String,
+        #[arg(long, help = DRY_RUN_HELP)]
+        dry_run: bool,
+    },
+    /// Rename a symbol across every file that references it
+    ///
+    /// Uses LSP textDocument/rename to compute a reference-safe edit set
+    /// across the whole project. Without --apply, only previews the edits
+    /// (files + edit counts) — nothing is written to disk. Rename
+    /// completeness depends on the language server having fully indexed
+    /// the project, and on dynamically-typed languages (Python, Ruby)
+    /// being able to prove two usages refer to the same symbol at all —
+    /// always inspect the preview, and re-run `search`/`reference` for the
+    /// old name afterward to confirm nothing was missed before trusting
+    /// the result.
+    #[command(alias = "rn")]
+    Rename {
+        file: String,
+        #[arg(long, help = SCOPE_HELP)]
+        scope: Option<String>,
+        #[arg(long, help = FIND_HELP)]
+        find: Option<String>,
+        /// The new name for the symbol.
+        #[arg(long)]
+        new_name: String,
+        /// Write the computed edits to disk. Without this flag, only previews them.
+        #[arg(long)]
+        apply: bool,
+        #[arg(short, long, help = PROJECT_HELP)]
+        project: Option<String>,
+        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
+        output: String,
+        #[arg(long, help = DRY_RUN_HELP)]
+        dry_run: bool,
+    },
     /// Get the full source code of the symbol at a location
     ///
     /// Prefer this over reading the whole file when you only need one
@@ -516,6 +570,46 @@ async fn run(cli: Cli) -> Result<()> {
                 &file,
                 ScopeFind { scope, find },
                 &direction,
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
+        }
+        Commands::Hierarchy {
+            file,
+            direction,
+            scope,
+            find,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_hierarchy(
+                &file,
+                ScopeFind { scope, find },
+                &direction,
+                project.as_deref(),
+                dry_run,
+                &fmt_of(&output)?,
+            )
+            .await?;
+        }
+        Commands::Rename {
+            file,
+            scope,
+            find,
+            new_name,
+            apply,
+            project,
+            output,
+            dry_run,
+        } => {
+            commands::run_rename(
+                &file,
+                ScopeFind { scope, find },
+                &new_name,
+                apply,
                 project.as_deref(),
                 dry_run,
                 &fmt_of(&output)?,

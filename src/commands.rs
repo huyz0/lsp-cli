@@ -24,8 +24,8 @@ use crate::manager_client::ManagerClient;
 use crate::project::{language_id, resolve_project, ProjectContext};
 use crate::protocol::{
     symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
-    DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location, LocationOrMany,
-    SymbolInformation,
+    DocumentChangeOp, DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location,
+    LocationOrMany, SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit,
 };
 use crate::registry;
 
@@ -356,6 +356,225 @@ pub async fn run_calls(
     };
 
     println!("{}", fmt.calls(direction, &items));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// hierarchy
+// ---------------------------------------------------------------------------
+
+pub async fn run_hierarchy(
+    file: &str,
+    sf: ScopeFind,
+    direction: &str,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    if direction != "supertypes" && direction != "subtypes" {
+        bail!("Unknown direction: {direction} (expected one of: subtypes, supertypes)");
+    }
+
+    let ctx = resolve_project(file, project)?;
+    let content = read_file(&ctx.file_path)?;
+    let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
+
+    if dry_run {
+        let method = if direction == "supertypes" {
+            "typeHierarchy/supertypes"
+        } else {
+            "typeHierarchy/subtypes"
+        };
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            &format!("textDocument/prepareTypeHierarchy -> {method}"),
+            json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}}),
+        );
+        return Ok(());
+    }
+
+    let client = ensure_daemon_session(&ctx, &content).await?;
+    let project_root = ctx.project_root.to_string_lossy();
+
+    let prepared = client
+        .proxy_request(
+            &project_root,
+            Some(&ctx.language),
+            "textDocument/prepareTypeHierarchy",
+            json!({ "textDocument": { "uri": ctx.uri }, "position": { "line": pos.line, "character": pos.character } }),
+        )
+        .await?;
+    let items: Vec<TypeHierarchyItem> = serde_json::from_value(prepared).unwrap_or_default();
+    let Some(root) = items.into_iter().next() else {
+        println!("{}", fmt.hierarchy(direction, &[]));
+        return Ok(());
+    };
+    let root_json = serde_json::to_value(&root)?;
+
+    let method = if direction == "supertypes" {
+        "typeHierarchy/supertypes"
+    } else {
+        "typeHierarchy/subtypes"
+    };
+    let result = client
+        .proxy_request(
+            &project_root,
+            Some(&ctx.language),
+            method,
+            json!({ "item": root_json }),
+        )
+        .await?;
+    let items: Vec<TypeHierarchyItem> = serde_json::from_value(result).unwrap_or_default();
+
+    println!("{}", fmt.hierarchy(direction, &items));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// rename
+// ---------------------------------------------------------------------------
+
+/// Groups a `WorkspaceEdit`'s per-file text edits regardless of which of
+/// the two shapes the server used — `documentChanges` (preferred when
+/// present per spec, since it can carry document versions) or the older
+/// flat `changes` map. `documentChanges` entries that are file operations
+/// (create/rename/delete a file, not a text edit) aren't applied by this
+/// tool; their count is returned separately so the caller can surface
+/// "N operations skipped" instead of silently treating the rename as fully
+/// applied when it wasn't.
+fn collect_edits(edit: &WorkspaceEdit) -> (Vec<(String, Vec<TextEdit>)>, usize) {
+    if let Some(doc_changes) = &edit.document_changes {
+        let mut files = Vec::new();
+        let mut skipped = 0;
+        for op in doc_changes {
+            match op {
+                DocumentChangeOp::Edit(te) => {
+                    files.push((te.text_document.uri.clone(), te.edits.clone()))
+                }
+                DocumentChangeOp::FileOp(_) => skipped += 1,
+            }
+        }
+        return (files, skipped);
+    }
+    if let Some(changes) = &edit.changes {
+        return (
+            changes
+                .iter()
+                .map(|(uri, edits)| (uri.clone(), edits.clone()))
+                .collect(),
+            0,
+        );
+    }
+    (vec![], 0)
+}
+
+/// Applies `edits` to `content` and returns the new text. Edits are applied
+/// in reverse position order (bottom-to-top, right-to-left within a line)
+/// so that applying one edit never invalidates the line/character offsets
+/// of edits still pending — the offsets in a `WorkspaceEdit` are all
+/// relative to the *original* unmodified document, per the LSP spec.
+/// Character offsets are treated as Unicode scalar (`char`) indices, not
+/// strict UTF-16 code units — the same simplification `locate.rs` already
+/// makes elsewhere in this codebase; fine for the overwhelmingly-ASCII
+/// identifiers a rename actually touches.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
+    let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
+    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.range
+            .start
+            .line
+            .cmp(&a.range.start.line)
+            .then(b.range.start.character.cmp(&a.range.start.character))
+    });
+
+    for edit in sorted {
+        let start_line = edit.range.start.line as usize;
+        let end_line = edit.range.end.line as usize;
+        if start_line >= lines.len() {
+            continue; // stale edit against content that's shifted since the server computed it
+        }
+        if start_line == end_line {
+            let chars: Vec<char> = lines[start_line].chars().collect();
+            let start_ch = (edit.range.start.character as usize).min(chars.len());
+            let end_ch = (edit.range.end.character as usize).min(chars.len());
+            let before: String = chars[..start_ch].iter().collect();
+            let after: String = chars[end_ch..].iter().collect();
+            lines[start_line] = format!("{before}{}{after}", edit.new_text);
+        } else if end_line < lines.len() {
+            let start_chars: Vec<char> = lines[start_line].chars().collect();
+            let end_chars: Vec<char> = lines[end_line].chars().collect();
+            let start_ch = (edit.range.start.character as usize).min(start_chars.len());
+            let end_ch = (edit.range.end.character as usize).min(end_chars.len());
+            let before: String = start_chars[..start_ch].iter().collect();
+            let after: String = end_chars[end_ch..].iter().collect();
+            lines.splice(
+                start_line..=end_line,
+                [format!("{before}{}{after}", edit.new_text)],
+            );
+        }
+    }
+    lines.join("\n")
+}
+
+pub async fn run_rename(
+    file: &str,
+    sf: ScopeFind,
+    new_name: &str,
+    apply: bool,
+    project: Option<&str>,
+    dry_run: bool,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    let ctx = resolve_project(file, project)?;
+    let content = read_file(&ctx.file_path)?;
+    let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
+
+    if dry_run {
+        print_dry_run(
+            &ctx.project_root,
+            Some(&ctx.language),
+            "textDocument/rename",
+            json!({"textDocument": {"uri": ctx.uri}, "position": {"line": pos.line, "character": pos.character}, "newName": new_name}),
+        );
+        return Ok(());
+    }
+
+    let client = ensure_daemon_session(&ctx, &content).await?;
+    let result = client
+        .proxy_request(
+            &ctx.project_root.to_string_lossy(),
+            Some(&ctx.language),
+            "textDocument/rename",
+            json!({ "textDocument": { "uri": ctx.uri }, "position": { "line": pos.line, "character": pos.character }, "newName": new_name }),
+        )
+        .await?;
+
+    if result.is_null() {
+        println!(
+            "{}",
+            fmt.error("No rename edits returned — the server may not support renaming this symbol, or the position doesn't resolve to a renameable symbol. Run `lsp locate` first to confirm the position resolves where you expect.")
+        );
+        return Ok(());
+    }
+    let edit: WorkspaceEdit = serde_json::from_value(result)?;
+    let (files_with_edits, skipped_ops) = collect_edits(&edit);
+
+    if apply {
+        for (uri, edits) in &files_with_edits {
+            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            let original = std::fs::read_to_string(path)
+                .map_err(|e| anyhow!("Cannot read {path} to apply rename: {e}"))?;
+            let updated = apply_text_edits(&original, edits);
+            std::fs::write(path, updated).map_err(|e| anyhow!("Cannot write {path}: {e}"))?;
+        }
+    }
+
+    println!(
+        "{}",
+        fmt.rename(new_name, apply, &files_with_edits, skipped_ops)
+    );
     Ok(())
 }
 
@@ -833,4 +1052,119 @@ pub fn run_schema(command: Option<&str>) -> Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Position, Range, TextDocumentEdit, VersionedTextDocumentIdentifier};
+
+    fn edit(sl: u32, sc: u32, el: u32, ec: u32, new_text: &str) -> TextEdit {
+        TextEdit {
+            range: Range {
+                start: Position {
+                    line: sl,
+                    character: sc,
+                },
+                end: Position {
+                    line: el,
+                    character: ec,
+                },
+            },
+            new_text: new_text.to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_text_edits_single_line_replace() {
+        let content = "fn greet() {}\n";
+        let out = apply_text_edits(content, &[edit(0, 3, 0, 8, "say_hi")]);
+        assert_eq!(out, "fn say_hi() {}\n");
+    }
+
+    #[test]
+    fn apply_text_edits_multiple_edits_same_file_dont_shift_each_other() {
+        // Two edits on different lines, applied together — since
+        // apply_text_edits sorts and applies bottom-to-top, the first
+        // edit's line/character offsets must not be invalidated by the
+        // second edit changing line lengths above it.
+        let content = "fn greet() {}\n\nfn call() {\n    greet();\n}\n";
+        let edits = vec![edit(0, 3, 0, 8, "say_hi"), edit(3, 4, 3, 9, "say_hi")];
+        let out = apply_text_edits(content, &edits);
+        assert_eq!(out, "fn say_hi() {}\n\nfn call() {\n    say_hi();\n}\n");
+    }
+
+    #[test]
+    fn apply_text_edits_multiline_range_splices_correctly() {
+        // Range starts right after "(" on line 0 and ends right before ")"
+        // on line 2, so both parens are already outside the edit range —
+        // new_text only needs to replace the parameter list between them.
+        let content = "fn greet(\n    name: &str\n) {}\n";
+        let out = apply_text_edits(content, &[edit(0, 9, 2, 0, "")]);
+        assert_eq!(out, "fn greet() {}\n");
+    }
+
+    #[test]
+    fn apply_text_edits_out_of_range_line_is_skipped_not_panicking() {
+        // Defends against a stale WorkspaceEdit computed against content
+        // that's since shrunk — must not panic on an out-of-bounds index.
+        let content = "fn greet() {}\n";
+        let out = apply_text_edits(content, &[edit(50, 0, 50, 5, "x")]);
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn collect_edits_prefers_document_changes_over_flat_changes() {
+        let doc_edit = TextDocumentEdit {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: "file:///a.rs".into(),
+            },
+            edits: vec![edit(0, 0, 0, 1, "x")],
+        };
+        let mut changes = std::collections::HashMap::new();
+        changes.insert("file:///b.rs".to_string(), vec![edit(0, 0, 0, 1, "y")]);
+        let we = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: Some(vec![DocumentChangeOp::Edit(doc_edit)]),
+        };
+        let (files, skipped) = collect_edits(&we);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "file:///a.rs");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn collect_edits_counts_file_operations_as_skipped_not_dropped_silently() {
+        let doc_edit = TextDocumentEdit {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: "file:///a.rs".into(),
+            },
+            edits: vec![edit(0, 0, 0, 1, "x")],
+        };
+        let file_op = serde_json::json!({"kind": "rename", "oldUri": "file:///old.rs", "newUri": "file:///new.rs"});
+        let we = WorkspaceEdit {
+            changes: None,
+            document_changes: Some(vec![
+                DocumentChangeOp::Edit(doc_edit),
+                DocumentChangeOp::FileOp(file_op),
+            ]),
+        };
+        let (files, skipped) = collect_edits(&we);
+        assert_eq!(files.len(), 1);
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn collect_edits_falls_back_to_flat_changes_when_no_document_changes() {
+        let mut changes = std::collections::HashMap::new();
+        changes.insert("file:///only.rs".to_string(), vec![edit(0, 0, 0, 1, "x")]);
+        let we = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+        };
+        let (files, skipped) = collect_edits(&we);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "file:///only.rs");
+        assert_eq!(skipped, 0);
+    }
 }

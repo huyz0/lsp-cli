@@ -172,6 +172,34 @@ release process today).
   `LspClient` any time a notification is drained. If a server has never
   pushed anything either, the pull failure is surfaced with an explicit
   hint rather than silently returning an empty list. `tests/diagnostics.rs`.
+- **`lsp hierarchy <file> --scope <symbol> [--direction subtypes|supertypes]`**:
+  LSP type hierarchy (`textDocument/prepareTypeHierarchy` +
+  `typeHierarchy/subtypes`/`supertypes`): class/interface inheritance,
+  the type-level sibling of `calls`' call hierarchy. `TypeHierarchyItem` is
+  identical in shape to `CallHierarchyItem` per spec, so `protocol.rs`
+  reuses the one struct via a type alias rather than duplicating it.
+  Verified live: `tests/csharp_lang.rs`.
+- **`lsp rename <file> --scope <symbol> --new-name <name> [--apply]`**:
+  LSP rename (`textDocument/rename`), the only write operation in this
+  tool. Without `--apply`, only previews the edits `WorkspaceEdit` would
+  make — nothing touches disk. This default-to-preview design is
+  deliberate: unlike the read-only commands, an incomplete rename applies
+  real edits and can leave a codebase silently half-renamed (a missed
+  reference under-indexed at request time, or a usage a
+  dynamically-typed server's duck-typing genuinely can't prove is the
+  same symbol) without announcing itself the way an empty search result
+  does. `collect_edits` normalizes the two `WorkspaceEdit` shapes a server
+  can return (`documentChanges` vs. the older flat `changes` map) and
+  explicitly counts (never silently drops) any `documentChanges` entries
+  that are file operations (create/rename/delete) rather than text edits,
+  since this tool doesn't apply those. A rename that also needs to rename
+  a *file* would otherwise look complete when it isn't. `apply_text_edits`
+  applies a file's edits in reverse position order so applying one edit
+  never invalidates the offsets of edits still pending, since a
+  `WorkspaceEdit`'s positions are all relative to the original unmodified
+  document. Verified live against `rust-analyzer`, including a full
+  `cargo build` of the renamed output to confirm the result still
+  compiles: `tests/rust_lang.rs`.
 
 ## CLI/agent usability
 

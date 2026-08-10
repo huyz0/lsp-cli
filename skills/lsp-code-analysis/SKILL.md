@@ -1,6 +1,6 @@
 ---
 name: lsp-code-analysis
-description: Code intelligence via LSP: definitions, references, outlines, docs, call hierarchy, diagnostics. Default to this over grep/read for code understanding tasks. It returns just the matching symbol or location instead of a full file or a page of grep noise to filter by hand, and does what grep/read can't: verify a file compiles, trace real call sites instead of text matches.
+description: Code intelligence via LSP: definitions, references, outlines, docs, call/type hierarchy, diagnostics, rename. Default to this over grep/read for code understanding tasks. It returns just the matching symbol or location instead of a full file or a page of grep noise to filter by hand, and does what grep/read can't: verify a file compiles, trace real call sites, safely rename a symbol across every file that uses it.
 ---
 
 # LSP Code Analysis
@@ -101,6 +101,16 @@ More precise than `reference` for impact analysis. It only follows actual
 call sites, not every textual usage (imports, type annotations, reads/writes
 of a variable with the same name).
 
+### `lsp hierarchy <file> --scope <symbol>`
+
+Find supertypes or subtypes of a class/interface: the type-level sibling
+of `calls`' call hierarchy.
+
+```bash
+lsp hierarchy src/models.ts --scope User                        # what extends/implements User (default: subtypes)
+lsp hierarchy src/models.ts --scope User --direction supertypes # what User extends/implements
+```
+
 ### `lsp diagnostics <file>`
 
 Report compiler/type-checker errors and warnings for a file.
@@ -112,6 +122,25 @@ lsp diagnostics src/service.ts
 **Run this after editing a file** to check it still compiles/typechecks,
 instead of invoking the project's own build tool. Not every language server
 supports this yet. If it fails, the error message says so explicitly.
+
+### `lsp rename <file> --scope <symbol> --new-name <name>`
+
+Rename a symbol across every file that references it. The only command in
+this tool that writes files.
+
+```bash
+lsp rename src/models.ts --scope User.greet --new-name sayHello              # preview only, writes nothing
+lsp rename src/models.ts --scope User.greet --new-name sayHello --apply      # writes the edits to disk
+```
+
+**Always run the preview first** (the default, no `--apply`) and check the
+edit count and file list before applying. Completeness depends on the
+language server having fully indexed the project, and on dynamically-typed
+languages (Python, Ruby) being able to prove two usages are the same symbol
+at all. An incomplete rename applies real edits and can leave the codebase
+silently half-renamed, unlike a wrong read-only result, which is just
+annoying to retry. After `--apply`, re-run `search`/`reference` for the old
+name to confirm nothing was missed.
 
 ### `lsp symbol <file> --scope <symbol>`
 
@@ -146,9 +175,10 @@ to a text-based index built across every file in every subproject, mixed
 languages included, which is fine for a rough lookup but loses LSP
 precision (exact symbol matches, not just name matches). File-scoped
 commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `calls`,
-`diagnostics`) don't have this problem: point one at any file and it
-auto-resolves the correct project and language server from that file's
-own location, regardless of how many other projects share the workspace.
+`hierarchy`, `diagnostics`, `rename`) don't have this problem: point one
+at any file and it auto-resolves the correct project and language server
+from that file's own location, regardless of how many other projects
+share the workspace.
 
 ### `lsp locate <file> --scope <scope>`
 
@@ -178,7 +208,7 @@ lsp schema definition   # show the input schema for `definition`
 
 ## Locate syntax
 
-The `--scope` and `--find` options are shared across all navigation commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `locate`):
+The `--scope` and `--find` options are shared across all navigation commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `calls`, `hierarchy`, `rename`, `locate`):
 
 | Format | Meaning |
 |--------|---------|

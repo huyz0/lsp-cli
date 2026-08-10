@@ -244,3 +244,51 @@ pub struct CallHierarchyIncomingCall {
 pub struct CallHierarchyOutgoingCall {
     pub to: CallHierarchyItem,
 }
+
+/// `TypeHierarchyItem` has the exact same shape as `CallHierarchyItem` per
+/// the LSP spec (name/kind/uri/range/selectionRange/detail) — reused rather
+/// than duplicated.
+pub type TypeHierarchyItem = CallHierarchyItem;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TextEdit {
+    pub range: Range,
+    #[serde(rename = "newText")]
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VersionedTextDocumentIdentifier {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TextDocumentEdit {
+    #[serde(rename = "textDocument")]
+    pub text_document: VersionedTextDocumentIdentifier,
+    pub edits: Vec<TextEdit>,
+}
+
+/// A `documentChanges` entry is either a plain `TextDocumentEdit` or a file
+/// operation (`CreateFile`/`RenameFile`/`DeleteFile`, distinguished by a
+/// `kind` field TextDocumentEdit doesn't have) — this tool only applies
+/// text edits; file operations are surfaced to the caller as skipped rather
+/// than silently dropped, since a rename that renames a *file* as well as
+/// its symbol would otherwise look complete when it isn't.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DocumentChangeOp {
+    Edit(TextDocumentEdit),
+    // The payload itself is never inspected — matching this variant at all
+    // (rather than the operation's specific shape) is the signal that it's
+    // an unsupported file operation to count and warn about.
+    FileOp(#[allow(dead_code)] serde_json::Value),
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct WorkspaceEdit {
+    #[serde(default)]
+    pub changes: Option<std::collections::HashMap<String, Vec<TextEdit>>>,
+    #[serde(default, rename = "documentChanges")]
+    pub document_changes: Option<Vec<DocumentChangeOp>>,
+}
