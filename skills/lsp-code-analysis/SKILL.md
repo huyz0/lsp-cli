@@ -291,7 +291,7 @@ Exception: literal string searches, comments, and non-code content (README prose
 
 | Symptom | Try this |
 |---|---|
-| "Symbol not found" or wrong location resolved | Run `lsp locate <file> --scope ... --find ...` with the same arguments. It's free (no LSP round trip) and shows exactly what position it resolved to. |
+| "Symbol not found" or wrong location resolved | Run `lsp locate <file> --scope ... --find ...` with the same arguments (see "Locate syntax" above for why). |
 | "Cannot detect project root" | The file isn't under a recognized root marker (package.json, Cargo.toml, go.mod, etc). Pass `--project <path>` explicitly. |
 | Command errors with an "Unknown mode"/"Unknown --output value" message | The value you passed is invalid and was rejected. These commands fail loudly rather than silently falling back to a default, so check the message's list of valid values. |
 | Results look stale after you (or another process) edited a file | Should self-correct: warm servers watch their project directory and get notified of external edits automatically. If it doesn't, `lsp server stop <project>` forces a clean respawn. |
