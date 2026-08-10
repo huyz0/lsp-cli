@@ -92,7 +92,7 @@ yourself. `lsp server list` shows what's running.
 | Kotlin | ✅ (GitHub release) | Full support. |
 | CSS | ✅ bundled, no install step | Outline (selectors, `@media`/`@keyframes`/`@supports` as nested containers) and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |
 | JSON | ✅ bundled, no install step | Outline and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |
-| HTML | ✅ | Outline is limited: the server returns a flat symbol list this tool doesn't parse into an outline tree yet. |
+| HTML | ✅ bundled, no install step | Full hierarchical outline (elements named `tag#id.class`) and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |
 | C / C++ | ✅ (`clangd`, GitHub release) | Full support. |
 | Lua | ✅ (GitHub release) | Full support. |
 | Zig | ✅ (`zls`, GitHub release) | Full support. |

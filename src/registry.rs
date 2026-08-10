@@ -147,8 +147,17 @@ pub fn languages() -> &'static [LanguageConfig] {
             name: "html",
             extensions: &[".html", ".htm"],
             root_markers: &[],
-            server_bin: "vscode-html-language-server",
-            server_args: |_| vec!["--stdio".to_string()],
+            // Rust-native, bundled as a sibling binary of `lsp` itself
+            // (see Cargo.toml's `[[bin]]` entries and src/servers/html_lsp.rs)
+            // rather than downloaded/npm-installed — no `--stdio` flag, it
+            // only ever speaks stdio. Also fixes a real gap the old
+            // vscode-html-language-server had: it returned flat
+            // SymbolInformation[] instead of hierarchical DocumentSymbol[]
+            // for documentSymbol, so outline came back empty. This one
+            // returns real nested DocumentSymbols (see
+            // docs/language-support.md).
+            server_bin: "lsp-html-lsp",
+            server_args: |_| vec![],
         },
         LanguageConfig {
             name: "css",

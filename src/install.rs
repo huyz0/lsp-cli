@@ -1,5 +1,5 @@
 //! Automatic language server installation. npm-installed servers
-//! (typescript, python, html, bash) get a thin shell wrapper into
+//! (typescript, python, bash) get a thin shell wrapper into
 //! `~/.lsp-cli/servers/<bin>` that execs `node <entry> "$@"`; gopls is
 //! `go install`ed into an isolated GOPATH and symlinked in; rust-analyzer,
 //! kotlin-language-server, clangd, lua-language-server, and zls are fetched
@@ -8,9 +8,9 @@
 //! sdkman/`JAVA_HOME`/`PATH` (installing a JDK itself is out of scope —
 //! it's a much bigger, more opinionated dependency than any other managed
 //! server); csharp-ls and ruby-lsp go through `dotnet tool install`/`gem
-//! install` respectively. json and css are Rust-native, bundled servers
-//! (see src/servers/) shipped as sibling binaries of `lsp` itself, so
-//! "installing" one is just confirming that binary is present, no
+//! install` respectively. json, css, and html are Rust-native, bundled
+//! servers (see src/servers/) shipped as sibling binaries of `lsp` itself,
+//! so "installing" one is just confirming that binary is present, no
 //! download/npm/network involved at all. deno remains unmanaged since it
 //! relies on the `deno` binary already being on `PATH`.
 
@@ -137,13 +137,6 @@ fn npm_spec(language: &str) -> Option<NpmSpec> {
             wrapper_name: "basedpyright-langserver",
             version_args: &["--version"],
             version_entry_rel: Some("node_modules/basedpyright/index.js"),
-        },
-        "html" => NpmSpec {
-            packages: &["vscode-langservers-extracted"],
-            entry_rel: "node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
-            wrapper_name: "vscode-html-language-server",
-            version_args: &["--version"],
-            version_entry_rel: None,
         },
         "bash" => NpmSpec {
             packages: &["bash-language-server"],
@@ -1019,6 +1012,7 @@ async fn install_language(language: &str) -> Result<PathBuf> {
         "ruby" => install_ruby_lsp(),
         "json" => install_bundled_server("lsp-json-lsp"),
         "css" => install_bundled_server("lsp-css-lsp"),
+        "html" => install_bundled_server("lsp-html-lsp"),
         other => bail!(
             "Unknown language: {other}\nSupported: {}",
             MANAGED_LANGUAGES.join(", ")
@@ -1042,6 +1036,7 @@ fn check_version(language: &str) -> Option<String> {
         "ruby" => check_ruby_lsp_version(),
         "json" => check_bundled_server_version("lsp-json-lsp"),
         "css" => check_bundled_server_version("lsp-css-lsp"),
+        "html" => check_bundled_server_version("lsp-html-lsp"),
         _ => None,
     }
 }
@@ -1245,6 +1240,7 @@ mod tests {
                     | "ruby"
                     | "json"
                     | "css"
+                    | "html"
             );
             assert!(
                 has_npm_spec || has_explicit_arm,

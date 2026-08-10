@@ -117,9 +117,9 @@ constant.
 
 ## Automatic language server installation (`src/install.rs`)
 
-Every language except `deno` is auto-installable, including Java. `json`
-and `css` are bundled (see "Bundled Rust-native servers" below, no
-download at all); `typescript`/`python`/`html`/`bash` run `npm
+Every language except `deno` is auto-installable, including Java. `json`,
+`css`, and `html` are bundled (see "Bundled Rust-native servers" below, no
+download at all); `typescript`/`python`/`bash` run `npm
 install <package>` into `~/.lsp-cli/packages/` and write a `#!/bin/sh`
 wrapper into `~/.lsp-cli/servers/` that execs `node <entry> "$@"`; `go`
 runs `go install golang.org/x/tools/gopls@latest` into an isolated
@@ -161,37 +161,51 @@ release process today).
 ## Bundled Rust-native servers (`src/servers/`)
 
 Most managed languages proxy to a third-party server this tool downloads or
-npm-installs. JSON and CSS are the exceptions so far: `lsp-json-lsp`
-(`src/servers/json_lsp.rs`) and `lsp-css-lsp` (`src/servers/css_lsp.rs`)
-are real LSP servers written for this project, each compiled as a sibling
-binary of `lsp` itself via its own `[[bin]]` entry in `Cargo.toml`. `cargo
-build --release` produces `target/release/lsp`,
-`target/release/lsp-json-lsp`, and `target/release/lsp-css-lsp` in one
-shot, and every release archive ships all of them (packaging globs
-`lsp-*-lsp` rather than naming each one, so adding another bundled server
-doesn't need another edit to release.yml/install.sh/the Homebrew formula
-generator), so "installing" one of these servers is just confirming that
-sibling binary is present next to `lsp`, no network, no npm, no Node.js
-runtime. `registry::is_bundled_server` recognizes any `lsp-<lang>-lsp`
-binary name, and `registry::server_path` resolves it relative to
+npm-installs. JSON, CSS, and HTML are the exceptions so far: `lsp-json-lsp`
+(`src/servers/json_lsp.rs`), `lsp-css-lsp` (`src/servers/css_lsp.rs`), and
+`lsp-html-lsp` (`src/servers/html_lsp.rs`) are real LSP servers written for
+this project, each compiled as a sibling binary of `lsp` itself via its own
+`[[bin]]` entry in `Cargo.toml`. `cargo build --release` produces
+`target/release/lsp` and every `lsp-<lang>-lsp` binary in one shot, and
+every release archive ships all of them (packaging globs `lsp-*-lsp` rather
+than naming each one, so adding another bundled server doesn't need
+another edit to release.yml/install.sh/the Homebrew formula generator), so
+"installing" one of these servers is just confirming that sibling binary
+is present next to `lsp`, no network, no npm, no Node.js runtime.
+`registry::is_bundled_server` recognizes any `lsp-<lang>-lsp` binary name,
+and `registry::server_path` resolves it relative to
 `std::env::current_exe()`'s own directory, the same special-case treatment
 `deno` gets for resolving via `PATH` instead of the download-managed
 `install_dir`.
+
+HTML is the one that exists to fix a real bug, not just drop a runtime
+dependency: the npm-installed `vscode-html-language-server` this tool used
+before returns *flat* `SymbolInformation[]` instead of hierarchical
+`DocumentSymbol[]` for documentSymbol, so outline always came back empty
+for HTML, a genuine, previously-unfixable-from-the-client-side server
+limitation (see docs/language-support.md). `lsp-html-lsp` returns real
+nested symbols instead: `html` → `head`/`body` → elements, recursively,
+each named `tag#id.class` (`h1#greeting`, `div#app.container.main`),
+matching how browser devtools name elements. Void elements (`<img>`,
+`<br>`) correctly show as childless leaves since the grammar represents
+them the same way as any other element, just without an `end_tag` or
+children; `<script>`/`<style>` are distinct grammar node kinds
+(`script_element`/`style_element`) whose body is one opaque `raw_text`
+node, deliberately left unparsed rather than treated as nested HTML.
 
 Built on two crates rust-analyzer itself uses for the server side of the
 protocol: `lsp-server` (JSON-RPC-over-stdio framing and the request/
 notification dispatch loop; `src/lsp_client.rs` elsewhere in this codebase
 only ever implements the *client* side) and `lsp-types` (the protocol's
 type definitions). Parsing is `tree-sitter-<lang>` per server (`-json`,
-`-css`), the same incremental, editor-oriented grammar approach intended
-for every server under `src/servers/`.
+`-css`, `-html`), the same incremental, editor-oriented grammar approach
+intended for every server under `src/servers/`.
 
 Scope is deliberately narrow per server: `textDocument/documentSymbol` (a
-real hierarchical outline: JSON's nested objects/arrays and CSS's
-`@media`/`@supports` bodies become children, not the flat list the HTML
-server above returns, since this tool controls both ends of the protocol
-here) and a minimal `textDocument/hover`. No diagnostics, no completion, no
-schema/property-value validation.
+real hierarchical outline in every case, unlike the flat list the old HTML
+server returned, since this tool controls both ends of the protocol here)
+and a minimal `textDocument/hover`. No diagnostics, no completion, no
+schema/property-value/attribute-value validation.
 
 Two things worth knowing before adding another one of these:
 

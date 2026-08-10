@@ -80,20 +80,21 @@ pub fn has_rust_analyzer() -> bool {
     has_server("rust-analyzer")
 }
 
-pub fn has_html_server() -> bool {
-    has_server("vscode-html-language-server")
-}
-
-/// json's and css's servers are bundled and built as sibling binaries of
-/// `lsp` itself (see Cargo.toml's `[[bin]]` entries and src/servers/)
-/// rather than optional external dependencies — `cargo test`/`cargo build`
-/// building the package builds them too, so this is really just checking
-/// "did the build actually produce it," not "is it installed."
+/// json's, css's, and html's servers are bundled and built as sibling
+/// binaries of `lsp` itself (see Cargo.toml's `[[bin]]` entries and
+/// src/servers/) rather than optional external dependencies — `cargo
+/// test`/`cargo build` building the package builds them too, so this is
+/// really just checking "did the build actually produce it," not "is it
+/// installed."
 fn has_bundled_server(bin_name: &str) -> bool {
     bin_path()
         .parent()
         .map(|d| d.join(bin_name).exists())
         .unwrap_or(false)
+}
+
+pub fn has_html_server() -> bool {
+    has_bundled_server("lsp-html-lsp")
 }
 
 pub fn has_css_server() -> bool {

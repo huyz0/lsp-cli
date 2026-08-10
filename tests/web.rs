@@ -24,7 +24,7 @@ fn reset_daemon() {
 #[test]
 fn css_outline_returns_selector() {
     if !has_css_server() {
-        eprintln!("skipping: vscode-css-language-server not installed");
+        eprintln!("skipping: lsp-css-lsp not built");
         return;
     }
     reset_daemon();
@@ -46,7 +46,7 @@ fn css_outline_returns_selector() {
 #[test]
 fn css_doc_returns_hover_for_selector() {
     if !has_css_server() {
-        eprintln!("skipping: vscode-css-language-server not installed");
+        eprintln!("skipping: lsp-css-lsp not built");
         return;
     }
     let css = web_fixture("styles.css");
@@ -65,7 +65,7 @@ fn css_doc_returns_hover_for_selector() {
 #[test]
 fn json_outline_returns_keys_with_all_flag() {
     if !has_json_server() {
-        eprintln!("skipping: vscode-json-language-server not installed");
+        eprintln!("skipping: lsp-json-lsp not built");
         return;
     }
     // Force a clean slate right before this call specifically (rather than
@@ -90,21 +90,41 @@ fn json_outline_returns_keys_with_all_flag() {
 }
 
 #[test]
-fn html_outline_returns_valid_shape() {
+fn html_outline_is_hierarchical_and_names_id_class() {
     if !has_html_server() {
-        eprintln!("skipping: vscode-html-language-server not installed");
+        eprintln!("skipping: lsp-html-lsp not built");
         return;
     }
+    // The npm-installed vscode-html-language-server this tool used to
+    // proxy to returned flat `SymbolInformation[]` instead of hierarchical
+    // `DocumentSymbol[]` for documentSymbol, so outline always came back
+    // empty for HTML (a real, documented server limitation — see
+    // docs/language-support.md). lsp-html-lsp (Rust-native, bundled, see
+    // docs/architecture.md#bundled-rust-native-servers) fixes that: real
+    // nested symbols, `tag#id.class` naming.
     let html = web_fixture("index.html");
-    // vscode-html-language-server returns flat `SymbolInformation[]` (a
-    // `location` field) rather than hierarchical `DocumentSymbol[]` (a
-    // `range`/`selectionRange` pair) for textDocument/documentSymbol. The
-    // outline command only deserializes the hierarchical shape — a
-    // limitation inherited unchanged from the TS original's outline.ts,
-    // which is typed strictly as `DocumentSymbol[]` there too. So this
-    // command exits cleanly with an empty item list rather than an error;
-    // that's the expected, if unhelpful, behavior for this server.
     let data = lsp_json(&["outline", html.to_str().unwrap(), "--all"]);
     assert_eq!(data["kind"], "outline");
-    assert!(data["items"].is_array());
+    let root = data["items"].as_array().unwrap();
+    assert_eq!(root.len(), 1, "expected one root <html> symbol: {root:?}");
+    assert_eq!(root[0]["name"], "html");
+    let html_children = root[0]["children"].as_array().unwrap();
+    let names: Vec<&str> = html_children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"head"), "expected head in {names:?}");
+    let body = html_children
+        .iter()
+        .find(|c| c["name"] == "body")
+        .unwrap_or_else(|| panic!("expected body in {names:?}"));
+    let body_children = body["children"].as_array().unwrap();
+    let body_names: Vec<&str> = body_children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        body_names.contains(&"h1#greeting"),
+        "expected h1#greeting (tag#id naming) in {body_names:?}"
+    );
 }
