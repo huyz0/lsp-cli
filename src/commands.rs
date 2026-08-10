@@ -56,6 +56,7 @@ use crate::protocol::{
     ALL_SYMBOL_KIND_IDS,
 };
 use crate::registry;
+use crate::{CallDirection, DefinitionMode, HierarchyDirection, ReferenceMode};
 
 pub struct ScopeFind {
     pub scope: Option<String>,
@@ -316,21 +317,17 @@ pub async fn run_diagnostics(
 pub async fn run_calls(
     file: &str,
     sf: ScopeFind,
-    direction: &str,
+    direction: CallDirection,
     project: Option<&str>,
     dry_run: bool,
     fmt: &OutputFormat,
 ) -> Result<()> {
-    if direction != "incoming" && direction != "outgoing" {
-        bail!("Unknown direction: {direction} (expected one of: incoming, outgoing)");
-    }
-
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
 
     if dry_run {
-        let calls_method = if direction == "incoming" {
+        let calls_method = if direction == CallDirection::Incoming {
             "callHierarchy/incomingCalls"
         } else {
             "callHierarchy/outgoingCalls"
@@ -357,13 +354,13 @@ pub async fn run_calls(
         .await?;
     let items: Vec<CallHierarchyItem> = serde_json::from_value(prepared).unwrap_or_default();
     let Some(root) = items.into_iter().next() else {
-        println!("{}", fmt.calls(direction, &[]));
+        println!("{}", fmt.calls(direction.as_str(), &[]));
         return Ok(());
     };
 
     let root_json = serde_json::to_value(&root)?;
 
-    let items = if direction == "incoming" {
+    let items = if direction == CallDirection::Incoming {
         let result = client
             .proxy_request(
                 &project_root,
@@ -389,7 +386,7 @@ pub async fn run_calls(
         calls.into_iter().map(|c| c.to).collect::<Vec<_>>()
     };
 
-    println!("{}", fmt.calls(direction, &items));
+    println!("{}", fmt.calls(direction.as_str(), &items));
     Ok(())
 }
 
@@ -400,21 +397,17 @@ pub async fn run_calls(
 pub async fn run_hierarchy(
     file: &str,
     sf: ScopeFind,
-    direction: &str,
+    direction: HierarchyDirection,
     project: Option<&str>,
     dry_run: bool,
     fmt: &OutputFormat,
 ) -> Result<()> {
-    if direction != "supertypes" && direction != "subtypes" {
-        bail!("Unknown direction: {direction} (expected one of: subtypes, supertypes)");
-    }
-
     let ctx = resolve_project(file, project)?;
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
 
     if dry_run {
-        let method = if direction == "supertypes" {
+        let method = if direction == HierarchyDirection::Supertypes {
             "typeHierarchy/supertypes"
         } else {
             "typeHierarchy/subtypes"
@@ -441,12 +434,12 @@ pub async fn run_hierarchy(
         .await?;
     let items: Vec<TypeHierarchyItem> = serde_json::from_value(prepared).unwrap_or_default();
     let Some(root) = items.into_iter().next() else {
-        println!("{}", fmt.hierarchy(direction, &[]));
+        println!("{}", fmt.hierarchy(direction.as_str(), &[]));
         return Ok(());
     };
     let root_json = serde_json::to_value(&root)?;
 
-    let method = if direction == "supertypes" {
+    let method = if direction == HierarchyDirection::Supertypes {
         "typeHierarchy/supertypes"
     } else {
         "typeHierarchy/subtypes"
@@ -461,7 +454,7 @@ pub async fn run_hierarchy(
         .await?;
     let items: Vec<TypeHierarchyItem> = serde_json::from_value(result).unwrap_or_default();
 
-    println!("{}", fmt.hierarchy(direction, &items));
+    println!("{}", fmt.hierarchy(direction.as_str(), &items));
     Ok(())
 }
 
@@ -657,7 +650,7 @@ fn filter_top_level(symbols: Vec<DocumentSymbol>) -> Vec<DocumentSymbol> {
 pub async fn run_definition(
     file: &str,
     sf: ScopeFind,
-    mode: &str,
+    mode: DefinitionMode,
     project: Option<&str>,
     dry_run: bool,
     fmt: &OutputFormat,
@@ -666,12 +659,9 @@ pub async fn run_definition(
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
     let method = match mode {
-        "definition" => "textDocument/definition",
-        "declaration" => "textDocument/declaration",
-        "type_definition" => "textDocument/typeDefinition",
-        other => bail!(
-            "Unknown mode: {other} (expected one of: definition, declaration, type_definition)"
-        ),
+        DefinitionMode::Definition => "textDocument/definition",
+        DefinitionMode::Declaration => "textDocument/declaration",
+        DefinitionMode::TypeDefinition => "textDocument/typeDefinition",
     };
 
     if dry_run {
@@ -712,7 +702,7 @@ pub async fn run_definition(
 pub async fn run_reference(
     file: &str,
     sf: ScopeFind,
-    mode: &str,
+    mode: ReferenceMode,
     project: Option<&str>,
     dry_run: bool,
     max_items: usize,
@@ -723,9 +713,8 @@ pub async fn run_reference(
     let content = read_file(&ctx.file_path)?;
     let pos = resolve_locate(&content, sf.scope.as_deref(), sf.find.as_deref())?;
     let method = match mode {
-        "references" => "textDocument/references",
-        "implementations" => "textDocument/implementation",
-        other => bail!("Unknown mode: {other} (expected one of: references, implementations)"),
+        ReferenceMode::References => "textDocument/references",
+        ReferenceMode::Implementations => "textDocument/implementation",
     };
 
     if dry_run {

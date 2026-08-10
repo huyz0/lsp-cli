@@ -79,14 +79,14 @@ fn a_symbol_with_no_callers_returns_an_empty_list() {
 
 #[test]
 fn rejects_an_unknown_direction() {
-    if !has_ts_server() {
-        eprintln!("skipping: typescript-language-server not installed");
-        return;
-    }
-    let service = ts_fixture("src/service.ts");
+    // No language-server gate: `--direction` is a clap value enum now, so
+    // this is rejected at parse time, before the project root is resolved
+    // or a server is contacted. It used to be a plain String checked
+    // inside the async command body, which meant an invalid value did a
+    // pile of work before failing.
     let result = lsp(&[
         "calls",
-        service.to_str().unwrap(),
+        "any-file.ts",
         "--scope",
         "createUser",
         "--direction",
@@ -94,8 +94,13 @@ fn rejects_an_unknown_direction() {
     ]);
     assert_ne!(result.exit_code, 0);
     assert!(
-        result.stderr.contains("Unknown direction"),
+        result.stderr.contains("invalid value 'sideways'"),
         "unexpected stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains("incoming") && result.stderr.contains("outgoing"),
+        "the error should list the valid values: {}",
         result.stderr
     );
 }

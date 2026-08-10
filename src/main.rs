@@ -63,6 +63,80 @@ const PROJECT_HELP: &str = "Override the auto-detected project root (normally fo
 const DRY_RUN_HELP: &str =
     "Print the LSP request that would be sent, without contacting a language server.";
 
+/// Enum-valued flags, validated by clap at parse time.
+///
+/// These were plain `String`s checked inside the async command bodies, so
+/// an invalid value survived parsing and only failed after the project
+/// root had been resolved, the file read, and (for some commands) a
+/// language server contacted. `snake_case` renaming keeps the wire values
+/// exactly as they were: clap's default would have turned
+/// `type_definition` into `type-definition`, a breaking change to the CLI,
+/// the JSON schema and every documented example.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum DefinitionMode {
+    Definition,
+    Declaration,
+    TypeDefinition,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum ReferenceMode {
+    References,
+    Implementations,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum HierarchyDirection {
+    Subtypes,
+    Supertypes,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum Output {
+    Json,
+    Markdown,
+}
+
+impl CallDirection {
+    /// Wire name, as it appears in the JSON output's `direction` field and
+    /// on the command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallDirection::Incoming => "incoming",
+            CallDirection::Outgoing => "outgoing",
+        }
+    }
+}
+
+impl HierarchyDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HierarchyDirection::Subtypes => "subtypes",
+            HierarchyDirection::Supertypes => "supertypes",
+        }
+    }
+}
+
+impl From<Output> for OutputFormat {
+    fn from(o: Output) -> Self {
+        match o {
+            Output::Json => OutputFormat::Json,
+            Output::Markdown => OutputFormat::Markdown,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Show file structure (classes, functions, methods)
@@ -85,8 +159,8 @@ enum Commands {
         // actually returns a single symbol.
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -98,17 +172,16 @@ enum Commands {
     #[command(alias = "def")]
     Definition {
         file: String,
-        /// One of: definition (default), declaration, type_definition.
-        #[arg(long, default_value = "definition")]
-        mode: String,
+        #[arg(long, value_enum, default_value_t = DefinitionMode::Definition)]
+        mode: DefinitionMode,
         #[arg(long, help = SCOPE_HELP)]
         scope: Option<String>,
         #[arg(long, help = FIND_HELP)]
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -119,17 +192,16 @@ enum Commands {
     #[command(alias = "ref")]
     Reference {
         file: String,
-        /// One of: references (default), implementations.
-        #[arg(long, default_value = "references")]
-        mode: String,
+        #[arg(long, value_enum, default_value_t = ReferenceMode::References)]
+        mode: ReferenceMode,
         #[arg(long, help = SCOPE_HELP)]
         scope: Option<String>,
         #[arg(long, help = FIND_HELP)]
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
         /// Maximum results to return in this call. Defaults to
@@ -160,8 +232,8 @@ enum Commands {
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -177,8 +249,8 @@ enum Commands {
         file: String,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -192,17 +264,17 @@ enum Commands {
     #[command(alias = "c")]
     Calls {
         file: String,
-        /// One of: incoming (default — who calls this), outgoing (what this calls).
-        #[arg(long, default_value = "incoming")]
-        direction: String,
+        /// incoming: who calls this. outgoing: what this calls.
+        #[arg(long, value_enum, default_value_t = CallDirection::Incoming)]
+        direction: CallDirection,
         #[arg(long, help = SCOPE_HELP)]
         scope: Option<String>,
         #[arg(long, help = FIND_HELP)]
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -215,17 +287,18 @@ enum Commands {
     #[command(alias = "th")]
     Hierarchy {
         file: String,
-        /// One of: subtypes (default — what extends/implements this), supertypes (what this extends/implements).
-        #[arg(long, default_value = "subtypes")]
-        direction: String,
+        /// subtypes: what extends or implements this. supertypes: what
+        /// this extends or implements.
+        #[arg(long, value_enum, default_value_t = HierarchyDirection::Subtypes)]
+        direction: HierarchyDirection,
         #[arg(long, help = SCOPE_HELP)]
         scope: Option<String>,
         #[arg(long, help = FIND_HELP)]
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -255,8 +328,8 @@ enum Commands {
         apply: bool,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -273,8 +346,8 @@ enum Commands {
         find: Option<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
     },
@@ -290,8 +363,8 @@ enum Commands {
         scope: Option<String>,
         #[arg(long, help = FIND_HELP)]
         find: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
     },
     /// Search for symbols by name across the workspace
     ///
@@ -308,8 +381,8 @@ enum Commands {
         kinds: Vec<String>,
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
         /// Maximum results to return in this call. Defaults to
@@ -361,8 +434,8 @@ enum Commands {
         /// With `stop`: stop every running server, not just the one for --path.
         #[arg(long)]
         all: bool,
-        #[arg(long, default_value = "json", help = OUTPUT_HELP)]
-        output: String,
+        #[arg(long, value_enum, default_value_t = Output::Json, help = OUTPUT_HELP)]
+        output: Output,
     },
     /// Start an MCP (Model Context Protocol) server (stdio transport only)
     ///
@@ -393,14 +466,6 @@ enum Commands {
 /// clap `default_value` of 20 — so setting it did nothing.
 fn config_default_max_items() -> usize {
     config::load_config().default_max_items
-}
-
-fn fmt_of(output: &str) -> Result<OutputFormat> {
-    match output {
-        "json" => Ok(OutputFormat::Json),
-        "markdown" => Ok(OutputFormat::Markdown),
-        other => anyhow::bail!("Unknown --output value: {other} (expected one of: json, markdown)"),
-    }
 }
 
 /// Supports `--json '{"key":"value"}'` style invocation, matching
@@ -505,8 +570,7 @@ async fn run(cli: Cli) -> Result<()> {
             output,
             dry_run,
         } => {
-            commands::run_outline(&file, all, project.as_deref(), dry_run, &fmt_of(&output)?)
-                .await?;
+            commands::run_outline(&file, all, project.as_deref(), dry_run, &output.into()).await?;
         }
         Commands::Definition {
             file,
@@ -520,10 +584,10 @@ async fn run(cli: Cli) -> Result<()> {
             commands::run_definition(
                 &file,
                 ScopeFind { scope, find },
-                &mode,
+                mode,
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -542,12 +606,12 @@ async fn run(cli: Cli) -> Result<()> {
             commands::run_reference(
                 &file,
                 ScopeFind { scope, find },
-                &mode,
+                mode,
                 project.as_deref(),
                 dry_run,
                 max_items.unwrap_or_else(config_default_max_items),
                 start_index,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -564,7 +628,7 @@ async fn run(cli: Cli) -> Result<()> {
                 ScopeFind { scope, find },
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -574,8 +638,7 @@ async fn run(cli: Cli) -> Result<()> {
             output,
             dry_run,
         } => {
-            commands::run_diagnostics(&file, project.as_deref(), dry_run, &fmt_of(&output)?)
-                .await?;
+            commands::run_diagnostics(&file, project.as_deref(), dry_run, &output.into()).await?;
         }
         Commands::Calls {
             file,
@@ -589,10 +652,10 @@ async fn run(cli: Cli) -> Result<()> {
             commands::run_calls(
                 &file,
                 ScopeFind { scope, find },
-                &direction,
+                direction,
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -608,10 +671,10 @@ async fn run(cli: Cli) -> Result<()> {
             commands::run_hierarchy(
                 &file,
                 ScopeFind { scope, find },
-                &direction,
+                direction,
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -632,7 +695,7 @@ async fn run(cli: Cli) -> Result<()> {
                 apply,
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -649,7 +712,7 @@ async fn run(cli: Cli) -> Result<()> {
                 ScopeFind { scope, find },
                 project.as_deref(),
                 dry_run,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -659,7 +722,7 @@ async fn run(cli: Cli) -> Result<()> {
             find,
             output,
         } => {
-            commands::run_locate(&file, ScopeFind { scope, find }, &fmt_of(&output)?)?;
+            commands::run_locate(&file, ScopeFind { scope, find }, &output.into())?;
         }
         Commands::Search {
             query,
@@ -679,7 +742,7 @@ async fn run(cli: Cli) -> Result<()> {
                 dry_run,
                 max_items.unwrap_or_else(config_default_max_items),
                 start_index,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }
@@ -713,7 +776,7 @@ async fn run(cli: Cli) -> Result<()> {
                 subcommand.as_deref().unwrap_or("list"),
                 path.as_deref(),
                 all,
-                &fmt_of(&output)?,
+                &output.into(),
             )
             .await?;
         }

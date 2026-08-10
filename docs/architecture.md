@@ -328,11 +328,17 @@ what `--scope`/`--find` syntax means, valid `--mode`/`--direction`/
 one-line summary for the top-level `lsp --help` list and a longer detail
 block for `lsp <command> --help`.
 
-Every mode/direction/output flag fails loudly on an invalid value with the
-valid options listed (e.g. `Unknown mode: bogus (expected one of:
-references, implementations)`) rather than silently falling back to a
-default. That matters for scripted/agent callers, where a silently-wrong
-result is worse than a clear error.
+Every mode/direction/output flag is a clap `ValueEnum`, so an invalid
+value is rejected at parse time with the valid options listed, and
+`--help` shows them. These used to be `String`s validated inside the async
+command bodies, which meant a typo survived parsing and only failed after
+the project root had been resolved, the file read, and sometimes a
+language server contacted. The enums rename to `snake_case` so the wire
+values are unchanged (`type_definition`, not `type-definition`).
+
+`search --kinds` validates the same way, in the command body since it is
+repeatable: an unrecognized kind is an error naming the valid set, not a
+filter that silently matches nothing.
 
 `skills/lsp-code-analysis/SKILL.md` teaches an LLM/agent how to use this
 CLI well: command reference, `--scope`/`--find` syntax, a troubleshooting

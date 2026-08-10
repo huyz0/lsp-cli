@@ -210,7 +210,8 @@ Configuration lives in `~/.lsp-cli/config.json`, all durations in
 | "Symbol not found", or a result from the wrong place | Run `lsp locate` with the same `--scope`/`--find` to see what position it resolved to. If a symbol path does not resolve, use a line number from `outline`. |
 | "Cannot detect project root" | The file is not under a recognized root marker. Pass `--project <path>`. |
 | "Unsupported file type" | The extension is not one of the supported languages. Use grep. |
-| `Unknown mode` / `Unknown direction` / `Unknown --kinds value` | The value is invalid and was rejected rather than defaulted. The message lists what is valid. `calls` uses `incoming`/`outgoing`; `hierarchy` uses `subtypes`/`supertypes`. |
+| `invalid value '...' for '--mode'` / `--direction` / `--output` | Rejected at parse time; the error lists the valid values. `calls` uses `incoming`/`outgoing`, `hierarchy` uses `subtypes`/`supertypes`. |
+| `Unknown --kinds value(s)` | Same idea for `search --kinds`; the message lists every valid kind. |
 | A command hangs, or results look stale | `lsp server list` to see what is running, then `lsp server stop <project>` to force a respawn. `lsp server shutdown` if the daemon itself is wedged. |
 | `hierarchy` fails on TypeScript | `typescript-language-server` does not implement type hierarchy. Not a bug in this tool. |
 | `outline --scope` is rejected | `outline` describes a whole file. Use `lsp symbol` for one symbol. |
