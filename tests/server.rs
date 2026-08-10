@@ -60,9 +60,17 @@ fn server_shutdown_exits_cleanly_and_removes_the_socket() {
 #[test]
 fn server_stop_all_when_no_servers_running_exits_cleanly() {
     let home = isolated_home("stop-all-empty");
+    // JSON is the default output format, so assert on that shape; the
+    // prose form is the markdown branch.
     let result = lsp_in(&home, &["server", "stop", "--all"]);
     assert_eq!(result.exit_code, 0, "{}", result.stderr);
-    assert!(result.stdout.contains("No servers stopped"));
+    let data: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(data["kind"], "serversStopped");
+    assert_eq!(data["servers"].as_array().map(|a| a.len()), Some(0));
+
+    let md = lsp_in(&home, &["server", "stop", "--all", "--output", "markdown"]);
+    assert_eq!(md.exit_code, 0, "{}", md.stderr);
+    assert!(md.stdout.contains("No servers stopped"));
 }
 
 fn server_pid(home: &IsolatedHome, project: &str) -> Option<u64> {

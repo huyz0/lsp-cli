@@ -5,6 +5,12 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
 
 ## Modules
 
+- **Shared library** (`src/lib.rs`): the few things both the CLI and the
+  bundled servers need, since those servers are separate `[[bin]]` targets
+  and can't reach `main.rs`'s module tree. `text_pos` holds byte/`char`/
+  UTF-16 position arithmetic and a line index; `uri` holds `file:` URI
+  encoding and decoding; `server_common` holds the language-agnostic half
+  of a bundled server.
 - **CLI plumbing** (`src/main.rs`): clap-derive command tree, including
   short aliases (`o`, `def`, `ref`, `d`, `sym`, `l`, `s`, `i`, `srv`),
   pagination flags, and a `--json '{...}'` structured-input path (parses a
@@ -51,7 +57,17 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
   command (1-based line numbers, consistent JSON keys, consistent icons in
   Markdown output).
 - **Config loading** (`src/config.rs`): reads `~/.lsp-cli/config.json`,
-  merges over defaults, never errors on a missing/malformed file.
+  merges over defaults, never errors on a missing/malformed file. All three
+  keys are live: `idleTimeout` (seconds) drives the daemon's reaper,
+  `managerTimeout` (seconds) bounds the wait for a daemon to come up, and
+  `defaultMaxItems` is the page size `reference`/`search` use when
+  `--max-items` is omitted. `managerTimeout` and `defaultMaxItems` were
+  parsed and documented but never read until they were wired up.
+- **State paths** (`src/paths.rs`): every on-disk location (config, socket,
+  spawn lock, installed servers, npm packages, GOPATH) derives from one
+  root, overridable with `LSP_CLI_HOME`. Five modules used to build
+  `~/.lsp-cli` independently, which left no way to relocate any of it —
+  and so the test suite ran against the developer's real daemon.
 - **MCP mode** (`src/mcp.rs`): a stdio JSON-RPC loop implementing
   `initialize`, `tools/list`, and `tools/call`. Tool calls shell out to the
   same binary with `--json` + `--project`.
@@ -108,12 +124,25 @@ started for a project is reused warm across calls, including across
 separate OS processes since the daemon is its own long-lived process.
 It's evicted only by `lsp server stop`, an idle timeout, or a detected crash.
 
-A fixed ~3000ms settle delay is paid after every `didOpen`/`didChange`
-before issuing the actual request (`commands.rs::DIDOPEN_SETTLE_DELAY_MS`),
-since there's no real "server finished indexing" signal to poll instead.
-It was tuned against multiple simultaneously-warm servers competing for CPU. A
-robust fix would poll an actual readiness signal instead of sleeping a
-constant.
+Two different waits cover two different problems.
+
+A **cold start** is handled in the daemon: `Manager::create` polls
+`textDocument/documentSymbol` until the freshly spawned server answers
+(`daemon.rs::wait_until_indexed`), still holding the per-project create
+lock. Doing it there rather than in the CLI matters, because a second
+command arriving mid-cold-start would otherwise see an entry that exists,
+treat it as warm, and query a server that is still loading. Servers differ
+by an order of magnitude here — gopls replies `no package metadata` and
+rust-analyzer replies nothing until their initial load finishes — so
+waiting for the observed condition beats any constant sized for the
+slowest.
+
+A **warm** server still gets a fixed `WARM_SETTLE_DELAY_MS` (3000ms) after
+`didOpen`/`didChange`, because a single-document change has no equivalent
+observable completion signal. That number was tuned against several warm
+servers competing for CPU. The bundled servers skip it entirely: they parse
+with tree-sitter synchronously inside the request handler, so there is
+nothing to wait for.
 
 ## Automatic language server installation (`src/install.rs`)
 

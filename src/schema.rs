@@ -3,9 +3,15 @@
 use serde_json::{json, Map, Value};
 
 pub fn schemas() -> Map<String, Value> {
+    // `project` is deliberately separate from scope/find. Bundling it in
+    // meant `lsp schema locate` advertised a `--project` flag that
+    // `Commands::Locate` does not accept, so an MCP client following the
+    // schema sent an argument that fails to parse.
     let scope_props = json!({
         "scope": {"type": "string", "description": "Symbol path or line number/range"},
         "find": {"type": "string", "description": "Text pattern within scope (use <|> for cursor position)"},
+    });
+    let project_props = json!({
         "project": {"type": "string", "description": "Override project root directory"},
     });
     let output_props = json!({
@@ -36,7 +42,10 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp outline", "description": "Show file structure (classes, functions, methods)",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "all": {"type": "boolean"}}), scope_props.clone(), output_props.clone()]),
+            // No scope/find: `outline` describes a whole file. It used to
+            // advertise them here while the implementation discarded them,
+            // so MCP callers were told to send flags that did nothing.
+            "properties": merge(&[json!({"file": {"type": "string"}, "all": {"type": "boolean"}, "project": {"type": "string"}}), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -45,7 +54,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp definition", "description": "Navigate to where a symbol is defined",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "mode": {"type": "string", "enum": ["definition", "declaration", "type_definition"]}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}, "mode": {"type": "string", "enum": ["definition", "declaration", "type_definition"]}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -54,7 +63,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp reference", "description": "Find all usages of a symbol",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "mode": {"type": "string", "enum": ["references", "implementations"]}}), scope_props.clone(), output_props.clone(), pagination_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}, "mode": {"type": "string", "enum": ["references", "implementations"]}}), scope_props.clone(), project_props.clone(), output_props.clone(), pagination_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -63,7 +72,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp doc", "description": "View documentation and type signature for a symbol",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -81,7 +90,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp calls", "description": "Find who calls, or is called by, a symbol",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "direction": {"type": "string", "enum": ["incoming", "outgoing"]}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}, "direction": {"type": "string", "enum": ["incoming", "outgoing"]}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -90,7 +99,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp hierarchy", "description": "Find supertypes or subtypes of a class/interface",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "direction": {"type": "string", "enum": ["subtypes", "supertypes"]}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}, "direction": {"type": "string", "enum": ["subtypes", "supertypes"]}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -99,7 +108,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp rename", "description": "Rename a symbol across every file that references it. Without \"apply\", only previews the edits.",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}, "new-name": {"type": "string"}, "apply": {"type": "boolean"}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}, "new-name": {"type": "string"}, "apply": {"type": "boolean"}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file", "new-name"],
         }),
     );
@@ -108,7 +117,7 @@ pub fn schemas() -> Map<String, Value> {
         json!({
             "title": "lsp symbol", "description": "Get the full source code of the symbol at a location",
             "type": "object",
-            "properties": merge(&[json!({"file": {"type": "string"}}), scope_props.clone(), output_props.clone()]),
+            "properties": merge(&[json!({"file": {"type": "string"}}), scope_props.clone(), project_props.clone(), output_props.clone()]),
             "required": ["file"],
         }),
     );
@@ -139,7 +148,11 @@ pub fn schemas() -> Map<String, Value> {
                 "language": {"type": "string", "description": "Language to install (e.g. typescript)"},
                 "list": {"type": "boolean", "description": "List all language servers and their install status"},
                 "update": {"type": "boolean", "description": "Update existing installation"},
+                // Documented in the README but previously absent here, so
+                // `lsp install --all` was unreachable through MCP.
+                "all": {"type": "boolean", "description": "Install every supported language server"},
             },
+            "required": [],
         }),
     );
     out.insert(
@@ -153,6 +166,7 @@ pub fn schemas() -> Map<String, Value> {
                 "all": {"type": "boolean"},
                 "output": {"type": "string"},
             },
+            "required": [],
         }),
     );
     out

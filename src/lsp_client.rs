@@ -40,10 +40,14 @@ enum RpcError {
     Io(#[from] anyhow::Error),
 }
 
-/// Runs one LSP server process for the lifetime of a single CLI invocation:
-/// spawn -> initialize -> one or more requests -> shutdown.
-/// This mirrors the TS `LspClient` but does not persist across invocations
-/// (this Rust port has no background manager daemon — see README for rationale).
+/// Owns one LSP server process: spawn -> initialize -> requests -> shutdown.
+///
+/// Instances live in the background daemon (`src/daemon.rs`), not in the
+/// CLI process, so a server started for a project stays warm and is reused
+/// across separate CLI invocations until it is stopped, idles out, or is
+/// found dead. The comment that used to sit here claimed the opposite —
+/// that this port had no daemon — which predates `daemon.rs` entirely and
+/// gave anyone reading this module first exactly the wrong model.
 pub struct LspClient {
     child: Child,
     stdin: ChildStdin,
@@ -332,9 +336,25 @@ impl LspClient {
                             "declaration": {"linkSupport": true},
                             "diagnostic": {},
                             "publishDiagnostics": {},
-                            "callHierarchy": {}
+                            "callHierarchy": {},
+                            // `hierarchy` and `rename` are shipped
+                            // commands, but neither capability was
+                            // announced. A server that registers providers
+                            // based on what the client claims to support
+                            // would refuse both — indistinguishable, from
+                            // the outside, from "this server doesn't
+                            // implement them".
+                            "typeHierarchy": {},
+                            "rename": {"prepareSupport": false}
                         },
-                        "workspace": {"symbol": {}}
+                        "workspace": {
+                            "symbol": {},
+                            // `collect_edits` handles the `documentChanges`
+                            // form of a WorkspaceEdit, so say so; without
+                            // it a server is entitled to reply with only
+                            // the older flat `changes` map.
+                            "workspaceEdit": {"documentChanges": true}
+                        }
                     },
                     "workspaceFolders": [{"uri": uri, "name": name}]
                 }),

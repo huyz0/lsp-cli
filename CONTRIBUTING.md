@@ -20,7 +20,7 @@ and symlink the servers into `~/.lsp-cli/servers/`:
 
 ```bash
 NPM=npm  # or your Node package manager
-$NPM install -g typescript-language-server basedpyright vscode-langservers-extracted
+$NPM install -g typescript-language-server basedpyright
 go install golang.org/x/tools/gopls@latest
 rustup component add rust-analyzer
 
@@ -29,9 +29,6 @@ ln -sf "$(which typescript-language-server)" typescript-language-server
 ln -sf "$(which basedpyright-langserver)" basedpyright-langserver
 ln -sf "$(which gopls || echo ~/go/bin/gopls)" gopls
 ln -sf "$(rustup which rust-analyzer)" rust-analyzer
-ln -sf "$(which vscode-html-language-server)" vscode-html-language-server
-ln -sf "$(which vscode-css-language-server)" vscode-css-language-server
-ln -sf "$(which vscode-json-language-server)" vscode-json-language-server
 
 cd <this repo>/tests/fixtures/typescript_project && npm install typescript
 ```
@@ -60,11 +57,13 @@ export PATH="$(gem environment | grep 'USER INSTALLATION DIRECTORY' | sed 's/.*:
 export BUNDLE_PATH="$HOME/.local/share/gem/bundle"
 ```
 
-Some tests spawn concurrent language-server processes against the same
-fixture project and can interfere with each other under default parallel
-test execution, or under general system load (inherent to per-invocation
-`tsserver`/`rust-analyzer` cold-start timing); run `cargo test --
---test-threads=1` if you see spurious failures there.
+Tests don't touch your real `~/.lsp-cli`. Each test binary runs against
+its own state directory under the system temp dir via `LSP_CLI_HOME`
+(see `tests/support/mod.rs`), keyed on the built binary's mtime so a
+rebuild starts a fresh daemon rather than inheriting the previous build's.
+Tests that start or kill daemons take a private directory each. So
+`cargo test` no longer shuts down whatever servers you had warm, and
+`--test-threads=1` is no longer needed.
 
 For details on which language server backs which support level, see
 [docs/language-support.md](docs/language-support.md). For how the codebase
@@ -72,8 +71,9 @@ is organized, see [docs/architecture.md](docs/architecture.md).
 
 ## Test suite structure
 
-`cargo test` runs 45 unit tests plus 67 integration tests across 21 files
-under `tests/`, against fixture projects in `tests/fixtures/`:
+`cargo test` runs the unit tests in `src/` plus the integration tests
+across the files under `tests/`, against fixture projects in
+`tests/fixtures/`:
 
 - **Unit** (in `src/`): Content-Length framing/parsing (`lsp_client.rs`), BM25
   tokenization/ranking *and* the per-language `extract_symbols` regex
@@ -90,13 +90,19 @@ under `tests/`, against fixture projects in `tests/fixtures/`:
   `CARGO_BIN_EXE_lsp`): `help`, `schema`, `locate` (no LSP server needed,
   always run); `outline`/`definition`/`reference`/`doc`/`symbol`/`calls`/
   `diagnostics`/`search` for TypeScript; `python.rs`, `go_lang.rs`,
-  `rust_lang.rs`, `web.rs` (CSS/JSON/HTML), `java_kotlin.rs`,
-  `markdown_lang.rs` for the other languages (each skips with a message if
+  `rust_lang.rs`, `web.rs` (CSS/JSON/HTML), `bash_lang.rs`,
+  `java_kotlin.rs`, `cpp_lang.rs`, `lua_lang.rs`, `zig_lang.rs`,
+  `ruby_lang.rs`, `csharp_lang.rs` for the other languages (each skips with a message if
   its server isn't installed, see
   [docs/language-support.md](docs/language-support.md) for what's actually
   installed and passing in a given environment). `mcp_stdio.rs` speaks the
   JSON-RPC protocol directly over the child process's stdio (`initialize`,
   `tools/list`, `tools/call`, unknown-tool error).
+- **Bundled servers** (`src/servers/*.rs`, plus `src/server_common.rs` and
+  the shared `src/lib.rs`): each server's symbol extractor is unit tested
+  directly against source snippets, with no stdio connection involved.
+  These need no installed language server — they are built from this repo
+  — so they run in CI along with `web.rs` and `bash_lang.rs`.
 - **`server.rs`** exercises the real background daemon lifecycle. No LSP
   server needed for list/stop/shutdown against an empty/no-daemon state;
   3 more (gated on `has_ts_server()`) cover daemon concurrency:

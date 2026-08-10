@@ -1,9 +1,10 @@
 //! File-system watcher for daemon-managed LSP servers, mirroring
-//! manager/watcher.ts (chokidar there, `notify` here). Only relevant to
-//! the daemon's `lsp server start`-warmed servers (see the "Navigation
-//! commands don't proxy through the daemon" deviation in the README) —
-//! per-invocation navigation commands always read the current file off
-//! disk directly, so they never need this.
+//! manager/watcher.ts (chokidar there, `notify` here).
+//!
+//! This keeps warm servers current with edits made *outside* the file a
+//! command is querying. The file under the cursor is always re-read from
+//! disk and pushed with `didOpen`/`didChange` by `ensure_daemon_session`,
+//! so the watcher's job is everything else in the project.
 //!
 //! Watches a project root for create/change/delete events on files whose
 //! extension matches the language's registered extensions, debounces them

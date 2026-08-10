@@ -3,7 +3,7 @@
 //! implemented by re-invoking this same binary as a subprocess with `--json`
 //! and capturing its stdout — exactly like the TS version does via
 //! `Bun.spawnSync`. Only the stdio transport is implemented (the TS SSE/HTTP
-//! transport is not ported — see README).
+//! transport is not ported).
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -34,7 +34,7 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                 "jsonrpc": "2.0", "id": id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "serverInfo": { "name": "lsp-cli", "version": "0.1.0" },
+                    "serverInfo": { "name": "lsp-cli", "version": env!("CARGO_PKG_VERSION") },
                     "capabilities": { "tools": {} }
                 }
             }),
@@ -60,12 +60,23 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                if !schemas().contains_key(name) {
+                let all = schemas();
+                if !all.contains_key(name) {
                     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Unknown tool: {name}") } })
                 } else {
                     let mut cmd = std::process::Command::new(&exe);
                     cmd.arg(name).arg("--json").arg(args.to_string());
-                    if let Some(p) = project {
+                    // Only for tools that actually accept it. `--project`
+                    // used to be appended to every invocation, so running
+                    // `lsp mcp --project <p>` made the locate, install and
+                    // server tools fail with a clap usage error on every
+                    // call — they have no such flag.
+                    let accepts_project = all
+                        .get(name)
+                        .and_then(|schema| schema.get("properties"))
+                        .and_then(|props| props.get("project"))
+                        .is_some();
+                    if let (Some(p), true) = (project, accepts_project) {
                         cmd.arg("--project").arg(p);
                     }
                     let output = cmd.output();

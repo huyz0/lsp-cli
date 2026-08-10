@@ -4,8 +4,8 @@
 //! (`src/daemon.rs`) via `ensure_daemon_session`, so a language server
 //! started for a project is reused warm across CLI invocations — including
 //! across separate OS processes — instead of being spawned and killed fresh
-//! on every single command. See README.md ("Reliability fixes" /
-//! "Manager daemon") for the history here.
+//! on every single command. See docs/architecture.md ("Manager daemon" /
+//! "Warm server reuse") for how that fits together.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -53,6 +53,7 @@ use crate::protocol::{
     symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
     DocumentChangeOp, DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location,
     LocationOrMany, SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit,
+    ALL_SYMBOL_KIND_IDS,
 };
 use crate::registry;
 
@@ -858,11 +859,17 @@ pub async fn run_symbol(
 
     let target = find_deepest_containing(&symbols, pos.line);
     let Some(target) = target else {
-        eprintln!(
+        // Same shape as `doc` and `rename` report their own "nothing
+        // here" case: a formatted result on stdout, exit 0. This used to
+        // write to stderr and `std::process::exit(1)` from inside a
+        // library function — skipping destructors, unreachable from a
+        // test without spawning a subprocess, and leaving an agent that
+        // captures stdout with nothing at all to parse.
+        println!(
             "{}",
             fmt.error(&format!("No symbol found at line {}", pos.line + 1))
         );
-        std::process::exit(1);
+        return Ok(());
     };
 
     let end = (target.range.end.line as usize + 1).min(lines.len());
@@ -990,7 +997,35 @@ pub async fn run_search(
     }
 
     if let Some(kinds) = kinds {
-        let kind_ids: std::collections::HashSet<u32> = (1u32..=26)
+        // Reject unknown values rather than filtering everything away. An
+        // unrecognized `--kinds` used to contribute nothing to the id set,
+        // so `--kinds klass` returned zero results and exit 0 — a silent
+        // wrong answer, indistinguishable from "no such symbol", and the
+        // opposite of how every other enum-valued flag here behaves.
+        let mut unknown: Vec<&str> = kinds
+            .iter()
+            .filter(|name| {
+                !ALL_SYMBOL_KIND_IDS
+                    .iter()
+                    .any(|k| symbol_kind_name(*k) == *name)
+            })
+            .map(|s| s.as_str())
+            .collect();
+        unknown.sort_unstable();
+        if !unknown.is_empty() {
+            let valid: Vec<&str> = ALL_SYMBOL_KIND_IDS
+                .iter()
+                .map(|k| symbol_kind_name(*k))
+                .collect();
+            bail!(
+                "Unknown --kinds value(s): {} (expected one of: {})",
+                unknown.join(", "),
+                valid.join(", ")
+            );
+        }
+        let kind_ids: std::collections::HashSet<u32> = ALL_SYMBOL_KIND_IDS
+            .iter()
+            .copied()
             .filter(|k| kinds.iter().any(|name| symbol_kind_name(*k) == name))
             .collect();
         results.retain(|s| kind_ids.contains(&s.kind));

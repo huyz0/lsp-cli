@@ -410,11 +410,6 @@ impl Bm25Index {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.docs.len()
-    }
-
     /// Score and rank all documents against a free-text query using Okapi BM25.
     pub fn search(&self, query: &str) -> Vec<(f64, &SymbolInformation)> {
         let q_tokens = tokenize(query);

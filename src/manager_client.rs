@@ -22,6 +22,9 @@ use crate::paths::spawn_lock_path;
 /// liveness within its own 8s deadline, so anything older than that is stale.
 const SPAWN_LOCK_STALE_AFTER: Duration = Duration::from_secs(15);
 
+/// How often `wait_for_alive` re-probes the socket while a daemon starts.
+const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 fn spawn_lock_is_stale(path: &Path) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -136,14 +139,23 @@ impl ManagerClient {
     }
 
     async fn wait_for_alive(&self) -> Result<()> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        // `managerTimeout` from ~/.lsp-cli/config.json. It was parsed,
+        // defaulted, documented as "daemon request timeout" and unit
+        // tested — and then never read by anything, so setting it had no
+        // effect. This is the wait it describes.
+        let timeout = Duration::from_secs(crate::config::load_config().manager_timeout);
+        let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
             if self.is_alive().await {
                 return Ok(());
             }
         }
-        bail!("lsp-cli daemon failed to start within 8s. Check ~/.lsp-cli/logs/ for errors.");
+        bail!(
+            "lsp-cli daemon failed to start within {}s (managerTimeout). Check {} for errors.",
+            timeout.as_secs(),
+            crate::paths::lsp_cli_home().join("logs").display()
+        );
     }
 
     pub async fn list_servers(&self) -> Result<Vec<ManagedServerInfo>> {

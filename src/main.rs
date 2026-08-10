@@ -5,13 +5,13 @@
 // method named `bind`" errors scattered across unrelated-looking files,
 // instead of one clear message explaining why up front. The daemon (and
 // therefore all warm-server reuse — every navigation command routes
-// through it, see README "Warm server reuse for navigation commands") has
-// no Windows implementation yet: that would mean a named-pipe transport
+// through it, see docs/architecture.md "Warm server reuse") has no Windows
+// implementation yet: that would mean a named-pipe transport
 // (`tokio::net::windows::named_pipe`) alongside the Unix socket one, which
-// hasn't been built. See README "Deviations from the TypeScript original".
+// hasn't been built. See docs/architecture.md "Portability".
 #[cfg(not(unix))]
 compile_error!(
-    "lsp-cli-rust's background daemon (used by every navigation command for warm server reuse) is Unix-only today — it uses a Unix Domain Socket with no Windows named-pipe equivalent implemented yet. See README.md's \"No Windows named-pipe support\" note."
+    "lsp-cli's background daemon (used by every navigation command for warm server reuse) is Unix-only today — it uses a Unix Domain Socket with no Windows named-pipe equivalent implemented yet. See docs/architecture.md's \"Portability\" section."
 );
 
 mod bm25;
@@ -39,7 +39,7 @@ use format::OutputFormat;
 #[derive(Parser)]
 #[command(
     name = "lsp",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "LSP-backed code navigation CLI"
 )]
 struct Cli {
@@ -77,10 +77,12 @@ enum Commands {
         /// top-level class/interface/enum/function/module/namespace/struct.
         #[arg(long)]
         all: bool,
-        #[arg(long, help = SCOPE_HELP)]
-        scope: Option<String>,
-        #[arg(long, help = FIND_HELP)]
-        find: Option<String>,
+        // No --scope/--find here on purpose. They were declared, advertised
+        // in --help and in `lsp schema outline`, and then silently
+        // discarded: outline always described the whole file. Rejecting
+        // them outright is the honest behaviour — an agent that passes one
+        // now gets an error naming `lsp symbol`, which is the command that
+        // actually returns a single symbol.
         #[arg(short, long, help = PROJECT_HELP)]
         project: Option<String>,
         #[arg(long, default_value = "json", help = OUTPUT_HELP)]
@@ -130,9 +132,10 @@ enum Commands {
         output: String,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
-        /// Maximum results to return in this call.
-        #[arg(long, default_value = "20")]
-        max_items: usize,
+        /// Maximum results to return in this call. Defaults to
+        /// `defaultMaxItems` from ~/.lsp-cli/config.json (20 if unset).
+        #[arg(long)]
+        max_items: Option<usize>,
         /// 0-based offset into the full result set — pass the previous
         /// page's item count to fetch the next page.
         #[arg(long, default_value = "0")]
@@ -309,9 +312,10 @@ enum Commands {
         output: String,
         #[arg(long, help = DRY_RUN_HELP)]
         dry_run: bool,
-        /// Maximum results to return in this call.
-        #[arg(long, default_value = "20")]
-        max_items: usize,
+        /// Maximum results to return in this call. Defaults to
+        /// `defaultMaxItems` from ~/.lsp-cli/config.json (20 if unset).
+        #[arg(long)]
+        max_items: Option<usize>,
         /// 0-based offset into the full result set — pass the previous
         /// page's item count to fetch the next page.
         #[arg(long, default_value = "0")]
@@ -382,6 +386,15 @@ enum Commands {
     },
 }
 
+/// Page size for `reference`/`search` when `--max-items` isn't given.
+///
+/// Reads `defaultMaxItems` from `~/.lsp-cli/config.json`. The value was
+/// parsed and documented but never consulted — both commands hardcoded a
+/// clap `default_value` of 20 — so setting it did nothing.
+fn config_default_max_items() -> usize {
+    config::load_config().default_max_items
+}
+
 fn fmt_of(output: &str) -> Result<OutputFormat> {
     match output {
         "json" => Ok(OutputFormat::Json),
@@ -445,8 +458,16 @@ fn inject_json_args(mut argv: Vec<String>) -> Vec<String> {
             }
         }
     }
-    argv.push("--output".to_string());
-    argv.push("json".to_string());
+    // Default to JSON (this form exists for programmatic callers) but let
+    // the payload ask for something else. This used to append
+    // `--output json` unconditionally, after the caller's own key/value
+    // pairs — and clap takes the last value for a scalar flag, so an
+    // explicit `"output": "markdown"` was silently overridden and the
+    // `output` property the schema advertises was unreachable.
+    if !obj.contains_key("output") {
+        argv.push("--output".to_string());
+        argv.push("json".to_string());
+    }
     argv
 }
 
@@ -480,8 +501,6 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Outline {
             file,
             all,
-            scope: _,
-            find: _,
             project,
             output,
             dry_run,
@@ -526,7 +545,7 @@ async fn run(cli: Cli) -> Result<()> {
                 &mode,
                 project.as_deref(),
                 dry_run,
-                max_items,
+                max_items.unwrap_or_else(config_default_max_items),
                 start_index,
                 &fmt_of(&output)?,
             )
@@ -658,7 +677,7 @@ async fn run(cli: Cli) -> Result<()> {
                 kinds,
                 project.as_deref(),
                 dry_run,
-                max_items,
+                max_items.unwrap_or_else(config_default_max_items),
                 start_index,
                 &fmt_of(&output)?,
             )
@@ -703,7 +722,7 @@ async fn run(cli: Cli) -> Result<()> {
                 mcp::run_mcp_stdio(project.as_deref())?;
             } else {
                 anyhow::bail!(
-                    "Only the stdio MCP transport is implemented in this Rust port (see README)."
+                    "Only the stdio MCP transport is implemented (see docs/architecture.md, \"MCP mode\")."
                 );
             }
         }
@@ -748,22 +767,47 @@ async fn run_server(sub: &str, path: Option<&str>, all: bool, fmt: &OutputFormat
             // No root override: `server start` is given a path (often a
             // bare directory) and wants the daemon's own detection.
             let info = client.create_server(&target, None).await?;
-            println!("Started {} server for {}", info.language, info.project_root);
+            // Honour --output like `server list` does. These three arms
+            // printed prose regardless of the format they were handed, so
+            // `lsp server start` emitted a sentence even though JSON is
+            // the default and README promises it for every command.
+            match fmt {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({ "kind": "serverStarted", "server": info })
+                ),
+                OutputFormat::Markdown => {
+                    println!("Started {} server for {}", info.language, info.project_root)
+                }
+            }
         }
         "stop" => {
             client.ensure_running().await?;
             let stopped = client.delete_servers(path, all).await?;
-            if stopped.is_empty() {
-                println!("No servers stopped.");
-            } else {
-                for s in stopped {
-                    println!("Stopped {} server for {}", s.language, s.project_root);
+            match fmt {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({ "kind": "serversStopped", "servers": stopped })
+                ),
+                OutputFormat::Markdown => {
+                    if stopped.is_empty() {
+                        println!("No servers stopped.");
+                    } else {
+                        for s in stopped {
+                            println!("Stopped {} server for {}", s.language, s.project_root);
+                        }
+                    }
                 }
             }
         }
         "shutdown" => {
             client.shutdown().await?;
-            println!("Manager shutdown.");
+            match fmt {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::json!({ "kind": "managerShutdown" }))
+                }
+                OutputFormat::Markdown => println!("Manager shutdown."),
+            }
         }
         other => {
             anyhow::bail!("Unknown server subcommand: {other}\nValid subcommands: list, start, stop, shutdown");

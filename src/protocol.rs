@@ -145,8 +145,39 @@ pub fn symbol_kind_name(kind: u32) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
-pub const TOP_LEVEL_KINDS: &[u32] = &[5, 11, 10, 12, 2, 3, 23]; // class, interface, enum, function, module, namespace, struct
+/// Every `SymbolKind` value the LSP spec defines, in numeric order.
+///
+/// Replaces a bare `(1u32..=26)` range in `commands.rs` and the unused
+/// `TOP_LEVEL_KINDS` constant that duplicated `commands.rs::filter_top_level`
+/// in magic numbers.
+pub const ALL_SYMBOL_KIND_IDS: &[u32] = &[
+    symbol_kind::FILE,
+    symbol_kind::MODULE,
+    symbol_kind::NAMESPACE,
+    symbol_kind::PACKAGE,
+    symbol_kind::CLASS,
+    symbol_kind::METHOD,
+    symbol_kind::PROPERTY,
+    symbol_kind::FIELD,
+    symbol_kind::CONSTRUCTOR,
+    symbol_kind::ENUM,
+    symbol_kind::INTERFACE,
+    symbol_kind::FUNCTION,
+    symbol_kind::VARIABLE,
+    symbol_kind::CONSTANT,
+    symbol_kind::STRING,
+    symbol_kind::NUMBER,
+    symbol_kind::BOOLEAN,
+    symbol_kind::ARRAY,
+    symbol_kind::OBJECT,
+    symbol_kind::KEY,
+    symbol_kind::NULL,
+    symbol_kind::ENUM_MEMBER,
+    symbol_kind::STRUCT,
+    symbol_kind::EVENT,
+    symbol_kind::OPERATOR,
+    symbol_kind::TYPE_PARAMETER,
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HoverResult {
@@ -197,13 +228,6 @@ impl HoverContents {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct InitializeResult {
-    #[allow(dead_code)]
-    pub capabilities: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct Diagnostic {
     pub range: Range,
     pub severity: Option<u32>,
@@ -215,9 +239,9 @@ pub struct Diagnostic {
 /// Result of `textDocument/diagnostic` (LSP 3.17 pull diagnostics). Only the
 /// "full" report (`items` present) carries diagnostics; an "unchanged"
 /// report means the client's cached result (keyed by `resultId`) is still
-/// valid — irrelevant here since every CLI invocation is a fresh process
-/// with no cache to reuse, so `items` defaults to empty for that case
-/// rather than erroring.
+/// valid. This tool never sends a `previousResultId`, so a spec-compliant
+/// server has nothing to report unchanged against; `items` defaults to
+/// empty for that case rather than erroring.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct DocumentDiagnosticReport {
     #[serde(default)]

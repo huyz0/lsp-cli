@@ -71,10 +71,12 @@ lsp search "User" --kinds class               # find a symbol workspace-wide
 lsp rename src/models.ts --scope User.greet --new-name sayHello --apply  # rename across every file
 ```
 
-Every command supports `--output json` (default) or `--output markdown`,
-and `--dry-run` to preview the LSP request without sending it. Run
-`lsp <command> --help` for full flag documentation, or `lsp schema
-[command]` to get a machine-readable JSON Schema of any command's input.
+Every navigation command takes `--output json` (the default) or `--output
+markdown`, and `--dry-run` to print the LSP request it would send without
+sending it. `install` and `schema` take neither; `locate` and `server`
+take `--output` but not `--dry-run`. Run `lsp <command> --help` for full
+flag documentation, or `lsp schema [command]` for a machine-readable JSON
+Schema of a command's input.
 
 A language server starts automatically on first use and stays warm in a
 background daemon, reused across calls, so you don't need to manage it
@@ -140,17 +142,23 @@ files just fall back to defaults):
 
 ```json
 {
-  "idleTimeout": 600000,
-  "managerTimeout": 60000,
+  "idleTimeout": 600,
+  "managerTimeout": 60,
   "defaultMaxItems": 20
 }
 ```
 
-- `idleTimeout` (ms, default 10 minutes): how long a warm language server
+Values above are the defaults. All durations are in **seconds**.
+
+- `idleTimeout` (default 600, ten minutes): how long a warm language server
   sits idle before the background daemon shuts it down.
-- `managerTimeout` (ms, default 60s): daemon request timeout.
-- `defaultMaxItems`: default page size for paginated commands
-  (`reference`, `search`).
+- `managerTimeout` (default 60): how long to wait for the daemon to come up
+  before giving up.
+- `defaultMaxItems` (default 20): page size for `reference` and `search`
+  when `--max-items` isn't given.
+
+Set `LSP_CLI_HOME` to relocate the whole state directory (config, socket,
+installed servers) if you want several independent instances.
 
 ## MCP server mode
 
