@@ -14,10 +14,35 @@ use std::path::{Path, PathBuf};
 use lsp::text_pos::utf16_col_to_byte;
 
 /// How long to wait after `didOpen`/`didChange` before issuing the actual
-/// request, giving the server time to build its AST. Empirically tuned —
-/// see the doc comment on `ensure_daemon_session` for the measurements
-/// behind this number and README "Reliability fixes" for the full history.
-const DIDOPEN_SETTLE_DELAY_MS: u64 = 3000;
+/// request, giving the server time to build its AST.
+///
+/// Still a sleep rather than a poll, because a *warm* server has no
+/// observable "done" signal for a single-document change — but it is now
+/// sized to the situation instead of being one worst-case constant paid by
+/// everything.
+///
+/// - **Bundled servers** parse synchronously inside the request handler
+///   (`src/servers/`, tree-sitter), so there is nothing to wait for at all.
+///   They were paying three seconds per command for no reason.
+/// - **A warm server** only has to digest the one document that changed,
+///   which is what the original 3000ms was actually measured against
+///   (several warm servers competing for CPU).
+///
+/// The cold-start case is handled where it belongs, in the daemon: see
+/// `daemon.rs::wait_until_indexed`, which polls for readiness under the
+/// per-project create lock so every caller benefits, not just whichever
+/// one happened to spawn the server.
+const BUNDLED_SETTLE_DELAY_MS: u64 = 0;
+const WARM_SETTLE_DELAY_MS: u64 = 3000;
+
+fn settle_delay(language: &str) -> std::time::Duration {
+    let ms = if registry::is_bundled_language(language) {
+        BUNDLED_SETTLE_DELAY_MS
+    } else {
+        WARM_SETTLE_DELAY_MS
+    };
+    std::time::Duration::from_millis(ms)
+}
 
 use crate::bm25::{is_ignored_dir_name, Bm25Index};
 use crate::format::OutputFormat;
@@ -126,16 +151,19 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
         .await?;
     // Give the server a moment to build its AST after didOpen. Warm reuse
     // only saves the (usually dominant) process-spawn + `initialize` cost.
-    // Delay chosen empirically: 800ms produced wrong/unresolved `definition`
-    // results under system load; 1500ms was reliable for a single warm
-    // server but still failed once multiple *different* language servers
-    // were warm and running concurrently — a new failure mode this reuse
-    // feature itself introduces (several servers competing for CPU during
-    // each other's analysis passes). 3000ms was reliable in that
-    // adversarial case (verified: `tests/web.rs` running css, html, and
-    // json commands back-to-back against three simultaneously-warm
-    // servers). See README "Reliability fixes" for the measurements.
-    tokio::time::sleep(std::time::Duration::from_millis(DIDOPEN_SETTLE_DELAY_MS)).await;
+    // The warm figure was chosen empirically: 800ms produced wrong/
+    // unresolved `definition` results under system load; 1500ms was
+    // reliable for a single warm server but still failed once multiple
+    // *different* language servers were warm and running concurrently
+    // (several servers competing for CPU during each other's analysis
+    // passes). 3000ms was reliable in that adversarial case — verified by
+    // `tests/web.rs` running css, html and json commands back-to-back
+    // against three simultaneously-warm servers. See `settle_delay` for
+    // why cold and bundled servers get different numbers.
+    let delay = settle_delay(&ctx.language);
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     Ok(client)
 }
 

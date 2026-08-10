@@ -24,6 +24,7 @@ mod locate;
 mod lsp_client;
 mod manager_client;
 mod mcp;
+mod paths;
 mod project;
 mod protocol;
 mod registry;

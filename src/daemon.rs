@@ -23,7 +23,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -36,6 +35,18 @@ pub struct ManagedServerInfo {
     /// OS process id of the spawned language server, for diagnostics and so
     /// callers/tests can verify a "reload" actually replaced the process.
     pub pid: Option<u32>,
+    /// True when this `create` call spawned the process, false when it
+    /// handed back an already-warm one.
+    ///
+    /// Lets the CLI size its post-`didOpen` settle wait to the situation
+    /// instead of paying one worst-case constant every time: a server that
+    /// has just finished `initialize` still has a whole project to index
+    /// (gopls answers `no package metadata` until it has), while a warm one
+    /// only needs to digest a single changed document. Not part of the
+    /// server's persistent state — it describes this response, so it is
+    /// excluded from `list` output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub just_started: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,7 +194,9 @@ impl Manager {
                 let alive = existing.client.lock().await.is_alive();
                 if alive {
                     existing.info.idle_since = now_ms();
-                    return Ok(existing.info.clone());
+                    let mut info = existing.info.clone();
+                    info.just_started = false;
+                    return Ok(info);
                 }
                 servers.remove(&key);
             }
@@ -199,10 +212,11 @@ impl Manager {
             status: "starting".into(),
             idle_since: now_ms(),
             pid: None,
+            just_started: true,
         };
 
         let client_res = LspClient::spawn(&bin.to_string_lossy(), &args, &root).await;
-        let client = match client_res {
+        let mut client = match client_res {
             Ok(mut c) => match c.initialize(&root).await {
                 Ok(_) => {
                     info.status = "running".into();
@@ -217,6 +231,14 @@ impl Manager {
             },
             Err(e) => return Err(e),
         };
+
+        // Wait for the initial index here, while still holding the per-key
+        // create lock, so *every* caller that asked for this project gets a
+        // server that can already answer — not just whichever one happened
+        // to spawn it. Doing this on the CLI side instead meant a second
+        // command arriving during a cold start saw an entry that existed,
+        // treated it as warm, and queried a server that was still loading.
+        wait_until_indexed(&mut client, detected.lang.name, file_path).await;
 
         self.watcher
             .ensure_watching(&root, detected.lang.extensions)
@@ -487,6 +509,72 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// How long a freshly spawned server is given to finish its initial index,
+/// and how often readiness is probed while waiting.
+///
+/// There is no portable "indexing finished" notification in LSP, so this
+/// polls for the thing callers actually need: `documentSymbol` on the file
+/// that triggered the spawn returning something. Servers differ by an order
+/// of magnitude here — typescript-language-server answers almost at once,
+/// gopls reports `no package metadata` until its initial load completes,
+/// rust-analyzer takes longer still — so waiting for the observed condition
+/// beats any constant large enough for the slowest of them.
+const INDEX_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const INDEX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Blocks until `client` can answer `documentSymbol` for `file_path`, or
+/// the timeout elapses.
+///
+/// Best-effort by design: a file that genuinely contains no symbols polls
+/// until the deadline and then proceeds, which is correct but slow — so
+/// this runs exactly once per spawned server, never on the warm path.
+/// Skipped for the bundled tree-sitter servers, which parse synchronously
+/// inside the request handler and have no indexing phase at all.
+async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &std::path::Path) {
+    if crate::registry::is_bundled_server(
+        crate::registry::languages()
+            .iter()
+            .find(|l| l.name == language)
+            .map(|l| l.server_bin)
+            .unwrap_or(""),
+    ) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(file_path) else {
+        return; // a bare directory, or an unreadable file: nothing to probe with
+    };
+    let uri = lsp::uri::from_path(file_path);
+    if client
+        .sync_document(&uri, crate::project::language_id(language), &text)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + INDEX_READY_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(INDEX_POLL_INTERVAL).await;
+        // An error means "still loading" for several servers, so it is a
+        // reason to keep waiting rather than to stop.
+        if let Ok(v) = client
+            .request(
+                "textDocument/documentSymbol",
+                Value::Object(serde_json::Map::from_iter([(
+                    "textDocument".to_string(),
+                    serde_json::json!({ "uri": uri }),
+                )])),
+            )
+            .await
+        {
+            let empty = v.is_null() || v.as_array().is_some_and(|a| a.is_empty());
+            if !empty {
+                return;
+            }
+        }
+    }
+}
+
 /// How long the shutdown handler waits before calling `process::exit`, so
 /// the HTTP 204 makes it back to the client that asked for the shutdown.
 const EXIT_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
@@ -499,12 +587,7 @@ fn is_stale(idle_since: i64, now: i64, cutoff_ms: i64) -> bool {
     now - idle_since > cutoff_ms
 }
 
-pub fn socket_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".lsp-cli")
-        .join("manager.sock")
-}
+pub use crate::paths::socket_path;
 
 type SharedManager = Arc<Manager>;
 

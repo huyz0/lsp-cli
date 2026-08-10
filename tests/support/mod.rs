@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 pub struct RunResult {
     pub stdout: String,
@@ -15,9 +16,117 @@ fn bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lsp"))
 }
 
+/// Isolated `LSP_CLI_HOME` for this test binary.
+///
+/// Every test used to run against the developer's real `~/.lsp-cli`, which
+/// meant `lsp server shutdown` in one test killed whatever daemon the
+/// developer (or another test binary running in parallel) had warm. Since
+/// cargo runs test binaries concurrently and tests within a binary on
+/// multiple threads, that produced exactly the "cannot reach manager
+/// daemon" failures this suite kept hitting.
+///
+/// One home per test binary: tests inside a binary still share a daemon
+/// (which is what most of them want — a warm server is expensive to start),
+/// but no two binaries can disturb each other. Tests that specifically need
+/// to shut the daemon down use [`isolated_home`] for a home of their own.
+fn shared_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        // Named after the test binary so parallel binaries never collide,
+        // and stable across runs so warm servers survive between them —
+        // but keyed on the `lsp` binary's mtime as well, so rebuilding the
+        // tool starts a fresh daemon instead of leaving the previous
+        // build's daemon serving stale behaviour. (Debugging that
+        // once is enough.)
+        let name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "unknown".into());
+        let build = std::fs::metadata(bin_path())
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("lsp-cli-test-{name}-{build}"));
+        prepare_home(&dir);
+        dir
+    })
+}
+
+/// Creates a state directory that can find the developer's real installed
+/// language servers.
+///
+/// The servers directory is linked rather than copied: pointing
+/// `LSP_CLI_HOME` at an empty temp dir would make every `has_*_server()`
+/// gate report "not installed", silently skipping the entire
+/// language-specific suite instead of isolating it.
+fn prepare_home(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("failed to create test LSP_CLI_HOME");
+    for shared in ["servers", "packages", "go"] {
+        let real = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".lsp-cli")
+            .join(shared);
+        let link = dir.join(shared);
+        if real.exists() && !link.exists() {
+            let _ = std::os::unix::fs::symlink(&real, &link);
+        }
+    }
+}
+
+/// A private state directory, removed when the returned guard drops. For
+/// tests that start, kill, or shut down a daemon and would otherwise
+/// disturb their neighbours.
+pub struct IsolatedHome {
+    dir: PathBuf,
+}
+
+impl IsolatedHome {
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        // Best effort: stop the daemon this home owns, then remove it.
+        let _ = Command::new(bin_path())
+            .args(["server", "shutdown"])
+            .env("LSP_CLI_HOME", &self.dir)
+            .output();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+pub fn isolated_home(label: &str) -> IsolatedHome {
+    let dir = std::env::temp_dir().join(format!(
+        "lsp-cli-test-{label}-{}-{}",
+        std::process::id(),
+        // Distinguishes concurrent tests in the same process without
+        // needing a random source.
+        NEXT_HOME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    prepare_home(&dir);
+    IsolatedHome { dir }
+}
+
+static NEXT_HOME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn lsp(args: &[&str]) -> RunResult {
+    run_with_home(shared_home(), args)
+}
+
+/// Runs `lsp` against a specific state directory.
+pub fn lsp_in(home: &IsolatedHome, args: &[&str]) -> RunResult {
+    run_with_home(home.path(), args)
+}
+
+fn run_with_home(home: &Path, args: &[&str]) -> RunResult {
     let output = Command::new(bin_path())
         .args(args)
+        .env("LSP_CLI_HOME", home)
         .output()
         .expect("failed to execute lsp binary");
     RunResult {

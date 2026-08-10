@@ -1,13 +1,13 @@
 //! A standalone, Rust-native LSP server for Bash/shell scripts, bundled and
 //! built alongside `lsp` itself — see `src/servers/json_lsp.rs`'s module
-//! doc comment for the shared architecture.
+//! doc comment for the shared architecture. Everything language-agnostic
+//! lives in `lsp::server_common`.
 //!
 //! Like `html_lsp.rs`, this exists partly to fix a real, documented gap:
 //! the npm-installed `bash-language-server` this tool used before returns
 //! an empty list for `textDocument/documentSymbol` on real scripts (a
-//! genuine server limitation, confirmed live, documented in
-//! docs/language-support.md), so `outline` never showed anything for Bash.
-//! `lsp-bash-lsp` returns real function symbols instead.
+//! genuine server limitation, confirmed live), so `outline` never showed
+//! anything for Bash. `lsp-bash-lsp` returns real function symbols instead.
 //!
 //! Unlike the JSON/CSS/HTML servers, this one also implements
 //! `textDocument/definition` and `textDocument/references` — the old
@@ -18,6 +18,10 @@
 //! function definition, function call, variable assignment, and variable
 //! expansion in the file is indexed by name in one pass, then definition/
 //! references are direct index lookups.
+//!
+//! One honest capability regression: hover shows the raw token text at the
+//! cursor, not real builtin documentation the way `bash-language-server`'s
+//! hover on `echo` used to. That data source doesn't exist here.
 //!
 //! Parsing is `tree-sitter-bash`. Its grammar (confirmed by dumping a real
 //! parse tree's s-expression, not guessed): both `name() { ... }` and
@@ -30,211 +34,91 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use lsp_server::{
-    Connection, ErrorCode, ExtractError, Message, Notification, Request, RequestId, Response,
-};
-use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-};
-use lsp_types::request::{DocumentSymbolRequest, GotoDefinition, HoverRequest, References};
-use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, Location,
-    MarkupContent, MarkupKind, OneOf, Position, Range, ReferenceParams, ServerCapabilities,
-    SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
-};
+use lsp::server_common::{find_child_by_kind, run, Document, Server, MAX_SYMBOL_DEPTH};
+use lsp_types::{DocumentSymbol, GotoDefinitionResponse, Location, SymbolKind, Uri};
 
-fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
-    if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("lsp-bash-lsp {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+struct BashServer;
+
+impl Server for BashServer {
+    fn name(&self) -> &'static str {
+        "lsp-bash-lsp"
     }
 
-    eprintln!("lsp-bash-lsp starting");
-    let (connection, io_threads) = Connection::stdio();
+    fn language(&self) -> tree_sitter::Language {
+        tree_sitter_bash::LANGUAGE.into()
+    }
 
-    let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-        document_symbol_provider: Some(OneOf::Left(true)),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        definition_provider: Some(OneOf::Left(true)),
-        references_provider: Some(OneOf::Left(true)),
-        ..Default::default()
-    };
-    let init_params = connection.initialize(serde_json::to_value(capabilities)?)?;
-    main_loop(connection, init_params)?;
-    io_threads.join()?;
-    eprintln!("lsp-bash-lsp shutting down");
-    Ok(())
-}
+    fn supports_navigation(&self) -> bool {
+        true
+    }
 
-struct Docs {
-    text: HashMap<Uri, String>,
-}
+    fn document_symbols(&self, doc: &Document) -> Vec<DocumentSymbol> {
+        let Some(tree) = doc.tree.as_ref() else {
+            return vec![];
+        };
+        symbols_for_node(doc, &tree.root_node(), 0)
+    }
 
-fn main_loop(
-    connection: Connection,
-    _init_params: serde_json::Value,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let mut docs = Docs {
-        text: HashMap::new(),
-    };
-
-    for msg in &connection.receiver {
-        match msg {
-            Message::Request(req) => {
-                if connection.handle_shutdown(&req)? {
-                    return Ok(());
-                }
-                let req = match extract::<DocumentSymbolRequest>(req) {
-                    Ok((id, params)) => {
-                        respond(&connection, id, handle_document_symbol(&docs, &params))?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let req = match extract::<HoverRequest>(req) {
-                    Ok((id, params)) => {
-                        respond(&connection, id, handle_hover(&docs, &params))?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let req = match extract::<GotoDefinition>(req) {
-                    Ok((id, params)) => {
-                        respond(&connection, id, handle_definition(&docs, &params))?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let req = match extract::<References>(req) {
-                    Ok((id, params)) => {
-                        respond(&connection, id, handle_references(&docs, &params))?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let resp = Response::new_err(
-                    req.id,
-                    ErrorCode::MethodNotFound as i32,
-                    format!("Unhandled method: {}", req.method),
-                );
-                connection.sender.send(Message::Response(resp))?;
-            }
-            Message::Notification(not) => {
-                handle_notification(&mut docs, not);
-            }
-            Message::Response(_) => {}
+    fn definition(&self, doc: &Document, uri: &Uri, byte: usize) -> Option<GotoDefinitionResponse> {
+        let tree = doc.tree.as_ref()?;
+        let name = identifier_at(doc, &tree.root_node(), byte)?;
+        let mut idx = Index::default();
+        build_index(doc, tree.root_node(), &mut idx);
+        let defs = idx.defs.get(&name)?;
+        if defs.is_empty() {
+            return None;
         }
+        Some(GotoDefinitionResponse::Array(
+            defs.iter()
+                .map(|n| Location {
+                    uri: uri.clone(),
+                    range: doc.node_range(n),
+                })
+                .collect(),
+        ))
     }
-    Ok(())
-}
 
-fn extract<R>(req: Request) -> Result<(RequestId, R::Params), Request>
-where
-    R: lsp_types::request::Request,
-    R::Params: serde::de::DeserializeOwned,
-{
-    match req.extract::<R::Params>(R::METHOD) {
-        Ok(v) => Ok(v),
-        Err(ExtractError::MethodMismatch(req)) => Err(req),
-        Err(ExtractError::JsonError { method, error }) => {
-            panic!("malformed params for {method}: {error}")
-        }
+    fn references(
+        &self,
+        doc: &Document,
+        uri: &Uri,
+        byte: usize,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let Some(tree) = doc.tree.as_ref() else {
+            return vec![];
+        };
+        let Some(name) = identifier_at(doc, &tree.root_node(), byte) else {
+            return vec![];
+        };
+        let mut idx = Index::default();
+        build_index(doc, tree.root_node(), &mut idx);
+
+        // Honour the request's `includeDeclaration`. This used to always
+        // return everything in `all`, definitions included, even though
+        // `commands.rs` asks for `includeDeclaration: false` — so `lsp
+        // reference` on a bash function always listed the function's own
+        // definition among its usages.
+        let declarations: Vec<usize> = if include_declaration {
+            Vec::new()
+        } else {
+            idx.defs
+                .get(&name)
+                .map(|d| d.iter().map(|n| n.id()).collect())
+                .unwrap_or_default()
+        };
+
+        idx.all
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .filter(|n| !declarations.contains(&n.id()))
+            .map(|n| Location {
+                uri: uri.clone(),
+                range: doc.node_range(n),
+            })
+            .collect()
     }
-}
-
-fn respond(
-    connection: &Connection,
-    id: RequestId,
-    result: impl serde::Serialize,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
-    connection
-        .sender
-        .send(Message::Response(Response::new_ok(id, result)))?;
-    Ok(())
-}
-
-fn handle_notification(docs: &mut Docs, not: Notification) {
-    match not.method.as_str() {
-        DidOpenTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(not.params) {
-                docs.text
-                    .insert(params.text_document.uri, params.text_document.text);
-            }
-        }
-        DidChangeTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(not.params) {
-                if let Some(change) = params.content_changes.into_iter().last() {
-                    docs.text.insert(params.text_document.uri, change.text);
-                }
-            }
-        }
-        DidCloseTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(not.params) {
-                docs.text.remove(&params.text_document.uri);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn parse(text: &str) -> Option<tree_sitter::Tree> {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_bash::LANGUAGE.into())
-        .ok()?;
-    parser.parse(text, None)
-}
-
-/// See json_lsp.rs's identical helper for why this matters: byte-offset
-/// tree-sitter `Point`s need real UTF-16-code-unit conversion to be a
-/// spec-compliant `Position`, not the char-count approximation this
-/// codebase's client side (`locate.rs`) allows itself when talking to
-/// *other* people's servers.
-fn point_to_position(text: &str, point: tree_sitter::Point) -> Position {
-    let line = text.lines().nth(point.row).unwrap_or("");
-    let byte_col = point.column.min(line.len());
-    let utf16_col: usize = line[..byte_col].chars().map(|c| c.len_utf16()).sum();
-    Position {
-        line: point.row as u32,
-        character: utf16_col as u32,
-    }
-}
-
-fn node_range(text: &str, node: &tree_sitter::Node) -> Range {
-    Range {
-        start: point_to_position(text, node.start_position()),
-        end: point_to_position(text, node.end_position()),
-    }
-}
-
-fn position_to_byte(text: &str, pos: Position) -> usize {
-    let mut byte_offset = 0;
-    for (i, line) in text.split('\n').enumerate() {
-        if i as u32 == pos.line {
-            let mut utf16_count = 0u32;
-            for (byte_idx, c) in line.char_indices() {
-                if utf16_count >= pos.character {
-                    return byte_offset + byte_idx;
-                }
-                utf16_count += c.len_utf16() as u32;
-            }
-            return byte_offset + line.len();
-        }
-        byte_offset += line.len() + 1;
-    }
-    text.len()
-}
-
-fn find_child_by_kind<'a>(
-    node: &tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    let found = node.children(&mut cursor).find(|c| c.kind() == kind);
-    found
 }
 
 /// Whole-document name index, built fresh per request (bash scripts are
@@ -251,61 +135,50 @@ struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
-    fn record_def(&mut self, text: &str, node: tree_sitter::Node<'a>) {
-        self.defs.entry(text.to_string()).or_default().push(node);
-        self.all.entry(text.to_string()).or_default().push(node);
+    fn record_def(&mut self, name: &str, node: tree_sitter::Node<'a>) {
+        self.defs.entry(name.to_string()).or_default().push(node);
+        self.all.entry(name.to_string()).or_default().push(node);
     }
 
-    fn record_ref(&mut self, text: &str, node: tree_sitter::Node<'a>) {
-        self.all.entry(text.to_string()).or_default().push(node);
+    fn record_ref(&mut self, name: &str, node: tree_sitter::Node<'a>) {
+        self.all.entry(name.to_string()).or_default().push(node);
     }
 }
 
-fn build_index<'a>(text: &str, node: tree_sitter::Node<'a>, idx: &mut Index<'a>) {
+fn build_index<'a>(doc: &Document, node: tree_sitter::Node<'a>, idx: &mut Index<'a>) {
     match node.kind() {
-        "function_definition" => {
+        "function_definition" | "variable_assignment" => {
             let name_id = node.child_by_field_name("name").map(|n| {
-                idx.record_def(&text[n.byte_range()], n);
+                idx.record_def(doc.slice(&n), n);
                 n.id()
             });
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if Some(child.id()) != name_id {
-                    build_index(text, child, idx);
-                }
-            }
-        }
-        "variable_assignment" => {
-            let name_id = node.child_by_field_name("name").map(|n| {
-                idx.record_def(&text[n.byte_range()], n);
-                n.id()
-            });
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if Some(child.id()) != name_id {
-                    build_index(text, child, idx);
+                    build_index(doc, child, idx);
                 }
             }
         }
         "command_name" => {
             if let Some(word) = node.named_child(0) {
-                idx.record_ref(&text[word.byte_range()], word);
+                idx.record_ref(doc.slice(&word), word);
             }
         }
-        "variable_name" => {
-            idx.record_ref(&text[node.byte_range()], node);
-        }
+        "variable_name" => idx.record_ref(doc.slice(&node), node),
         _ => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                build_index(text, child, idx);
+                build_index(doc, child, idx);
             }
         }
     }
 }
 
-#[allow(deprecated)] // `DocumentSymbol.deprecated` has no replacement in lsp_types; every constructor site sets it None the same way.
-fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol> {
+#[allow(deprecated)] // `DocumentSymbol.deprecated` has no replacement in lsp_types.
+fn symbols_for_node(doc: &Document, node: &tree_sitter::Node, depth: usize) -> Vec<DocumentSymbol> {
+    if depth >= MAX_SYMBOL_DEPTH {
+        return vec![];
+    }
     let mut out = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -314,23 +187,18 @@ fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol>
                 let Some(name_node) = child.child_by_field_name("name") else {
                     continue;
                 };
-                let name = text[name_node.byte_range()].to_string();
                 let body_children = find_child_by_kind(&child, "compound_statement")
-                    .map(|b| symbols_for_node(text, &b))
+                    .map(|b| symbols_for_node(doc, &b, depth + 1))
                     .unwrap_or_default();
                 out.push(DocumentSymbol {
-                    name,
+                    name: doc.slice(&name_node).to_string(),
                     detail: None,
                     kind: SymbolKind::FUNCTION,
                     tags: None,
                     deprecated: None,
-                    range: node_range(text, &child),
-                    selection_range: node_range(text, &name_node),
-                    children: if body_children.is_empty() {
-                        None
-                    } else {
-                        Some(body_children)
-                    },
+                    range: doc.node_range(&child),
+                    selection_range: doc.node_range(&name_node),
+                    children: (!body_children.is_empty()).then_some(body_children),
                 });
             }
             // Only surface top-level assignments in the outline — one inside
@@ -342,13 +210,13 @@ fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol>
             "variable_assignment" if node.kind() == "program" => {
                 if let Some(name_node) = child.child_by_field_name("name") {
                     out.push(DocumentSymbol {
-                        name: text[name_node.byte_range()].to_string(),
+                        name: doc.slice(&name_node).to_string(),
                         detail: None,
                         kind: SymbolKind::VARIABLE,
                         tags: None,
                         deprecated: None,
-                        range: node_range(text, &child),
-                        selection_range: node_range(text, &name_node),
+                        range: doc.node_range(&child),
+                        selection_range: doc.node_range(&name_node),
                         children: None,
                     });
                 }
@@ -359,91 +227,127 @@ fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol>
     out
 }
 
-fn handle_document_symbol(docs: &Docs, params: &DocumentSymbolParams) -> DocumentSymbolResponse {
-    let uri = &params.text_document.uri;
-    let Some(text) = docs.text.get(uri) else {
-        return DocumentSymbolResponse::Nested(vec![]);
-    };
-    let Some(tree) = parse(text) else {
-        return DocumentSymbolResponse::Nested(vec![]);
-    };
-    DocumentSymbolResponse::Nested(symbols_for_node(text, &tree.root_node()))
-}
-
-fn handle_hover(docs: &Docs, params: &HoverParams) -> Option<Hover> {
-    let uri = &params.text_document_position_params.text_document.uri;
-    let text = docs.text.get(uri)?;
-    let tree = parse(text)?;
-    let byte = position_to_byte(text, params.text_document_position_params.position);
-    let node = tree.root_node().descendant_for_byte_range(byte, byte)?;
-    let snippet = &text[node.byte_range()];
-    if snippet.trim().is_empty() {
-        return None;
-    }
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::PlainText,
-            value: snippet.to_string(),
-        }),
-        range: Some(node_range(text, &node)),
-    })
-}
-
 /// Finds the identifier text at `byte` — a `word` (function name, inside
 /// `command_name`), `variable_name`, or a `function_definition`'s own
 /// `name` field — so definition/references can look it up in the index
 /// regardless of which kind of node the cursor happens to land on.
-fn identifier_at<'a>(text: &str, root: &tree_sitter::Node<'a>, byte: usize) -> Option<String> {
+fn identifier_at(doc: &Document, root: &tree_sitter::Node, byte: usize) -> Option<String> {
     let node = root.descendant_for_byte_range(byte, byte)?;
     match node.kind() {
-        "variable_name" | "word" => Some(text[node.byte_range()].to_string()),
+        "variable_name" | "word" => Some(doc.slice(&node).to_string()),
         _ => None,
     }
 }
 
-fn handle_definition(docs: &Docs, params: &GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
-    let uri = &params.text_document_position_params.text_document.uri;
-    let text = docs.text.get(uri)?;
-    let tree = parse(text)?;
-    let byte = position_to_byte(text, params.text_document_position_params.position);
-    let name = identifier_at(text, &tree.root_node(), byte)?;
-    let mut idx = Index::default();
-    build_index(text, tree.root_node(), &mut idx);
-    let defs = idx.defs.get(&name)?;
-    if defs.is_empty() {
-        return None;
-    }
-    let locations: Vec<Location> = defs
-        .iter()
-        .map(|n| Location {
-            uri: uri.clone(),
-            range: node_range(text, n),
-        })
-        .collect();
-    Some(GotoDefinitionResponse::Array(locations))
+fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+    run(BashServer)
 }
 
-fn handle_references(docs: &Docs, params: &ReferenceParams) -> Vec<Location> {
-    let uri = &params.text_document_position.text_document.uri;
-    let Some(text) = docs.text.get(uri) else {
-        return vec![];
-    };
-    let Some(tree) = parse(text) else {
-        return vec![];
-    };
-    let byte = position_to_byte(text, params.text_document_position.position);
-    let Some(name) = identifier_at(text, &tree.root_node(), byte) else {
-        return vec![];
-    };
-    let mut idx = Index::default();
-    build_index(text, tree.root_node(), &mut idx);
-    idx.all
-        .get(&name)
-        .into_iter()
-        .flatten()
-        .map(|n| Location {
-            uri: uri.clone(),
-            range: node_range(text, n),
-        })
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(text: &str) -> Document {
+        Document::for_test(text, BashServer.language())
+    }
+
+    fn outline(text: &str) -> Vec<DocumentSymbol> {
+        BashServer.document_symbols(&doc(text))
+    }
+
+    fn uri() -> Uri {
+        "file:///s.sh".parse().unwrap()
+    }
+
+    /// Byte offset of the `nth` occurrence of `needle`.
+    fn nth_offset(text: &str, needle: &str, nth: usize) -> usize {
+        text.match_indices(needle).nth(nth).unwrap().0
+    }
+
+    #[test]
+    fn both_function_syntaxes_produce_the_same_symbol() {
+        let a = outline("greet() {\n  echo hi\n}\n");
+        let b = outline("function greet {\n  echo hi\n}\n");
+        assert_eq!(a[0].name, "greet");
+        assert_eq!(b[0].name, "greet");
+        assert_eq!(a[0].kind, SymbolKind::FUNCTION);
+        assert_eq!(b[0].kind, SymbolKind::FUNCTION);
+    }
+
+    #[test]
+    fn top_level_assignments_are_listed_but_local_ones_are_not() {
+        let syms = outline("TOP=1\nf() {\n  INNER=2\n}\n");
+        let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["TOP", "f"]);
+        assert_eq!(syms[0].kind, SymbolKind::VARIABLE);
+    }
+
+    #[test]
+    fn nested_functions_appear_as_children() {
+        let syms = outline("outer() {\n  inner() {\n    echo hi\n  }\n}\n");
+        assert_eq!(syms[0].name, "outer");
+        assert_eq!(syms[0].children.as_ref().unwrap()[0].name, "inner");
+    }
+
+    #[test]
+    fn definition_of_a_call_points_at_the_function() {
+        let text = "greet() {\n  echo hi\n}\ngreet\n";
+        let d = doc(text);
+        let at = nth_offset(text, "greet", 1); // the call, not the definition
+        let resp = BashServer.definition(&d, &uri(), at).unwrap();
+        let GotoDefinitionResponse::Array(locs) = resp else {
+            panic!("expected an array response");
+        };
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].range.start.line, 0);
+    }
+
+    #[test]
+    fn references_exclude_the_declaration_when_not_requested() {
+        // commands.rs sends includeDeclaration: false; this used to be
+        // ignored, so the definition always showed up among the usages.
+        let text = "greet() {\n  echo hi\n}\ngreet\ngreet\n";
+        let d = doc(text);
+        let at = nth_offset(text, "greet", 1);
+
+        let without = BashServer.references(&d, &uri(), at, false);
+        assert_eq!(without.len(), 2, "two call sites, no definition");
+        assert!(without.iter().all(|l| l.range.start.line > 0));
+
+        let with = BashServer.references(&d, &uri(), at, true);
+        assert_eq!(with.len(), 3, "definition included on request");
+    }
+
+    #[test]
+    fn variable_references_are_found() {
+        let text = "NAME=1\necho \"$NAME\"\n";
+        let d = doc(text);
+        let at = nth_offset(text, "NAME", 1);
+        let refs = BashServer.references(&d, &uri(), at, true);
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn definition_of_an_unknown_name_is_none() {
+        let text = "echo hi\n";
+        let d = doc(text);
+        assert!(BashServer
+            .definition(&d, &uri(), nth_offset(text, "hi", 0))
+            .is_none());
+    }
+
+    #[test]
+    fn malformed_script_does_not_panic() {
+        let _ = outline("");
+        let _ = outline("f() {");
+        let _ = outline("if then fi done }}}");
+    }
+
+    #[test]
+    fn positions_are_utf16_columns() {
+        // The emoji in the comment is 2 UTF-16 units but 1 char.
+        let syms = outline("# 😀\ngreet() {\n  echo hi\n}\n");
+        assert_eq!(syms[0].selection_range.start.line, 1);
+        assert_eq!(syms[0].selection_range.start.character, 0);
+    }
 }

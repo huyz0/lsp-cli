@@ -20,17 +20,7 @@ use std::process::Command;
 
 use crate::registry::default_install_dir;
 
-fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_default()
-}
-
-fn packages_dir() -> PathBuf {
-    home().join(".lsp-cli").join("packages")
-}
-
-fn go_dir() -> PathBuf {
-    home().join(".lsp-cli").join("go")
-}
+use crate::paths::{go_dir, packages_dir};
 
 /// Managed languages, in the same order `lsp install list` should show them.
 pub const MANAGED_LANGUAGES: &[&str] = &[
@@ -416,7 +406,11 @@ fn jdtls_install_dir() -> PathBuf {
 /// installed and `sdk use`/`sdk default` is how they pick one), then
 /// `JAVA_HOME`, then whatever `java` resolves to on `PATH`.
 fn find_java() -> Option<PathBuf> {
-    let sdkman_java = home()
+    // The user's real OS home, not lsp-cli's state directory: sdkman
+    // installs itself under `~/.sdkman` regardless of where lsp-cli keeps
+    // its own files.
+    let sdkman_java = dirs::home_dir()
+        .unwrap_or_default()
         .join(".sdkman")
         .join("candidates")
         .join("java")

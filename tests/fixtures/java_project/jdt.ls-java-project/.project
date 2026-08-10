@@ -18,7 +18,7 @@
 		<link>
 			<name>src/com/example/User.java</name>
 			<type>1</type>
-			<location>//home/tuong/work/lsp-cli-rust/tests/fixtures/java_project/src/main/java/com/example/User.java</location>
+			<location>//home/tuong/work/lsp-cli/tests/fixtures/java_project/src/main/java/com/example/User.java</location>
 		</link>
 	</linkedResources>
 </projectDescription>

@@ -33,13 +33,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Advisory, not a gate: the codebase currently carries a handful of
-      # pre-existing warnings (zombie-process lints in test helpers, an
-      # items-after-test-module style nit) that predate CI and aren't part
-      # of this workflow's scope to fix. `-D warnings` would make every PR
-      # fail on unrelated pre-existing findings; tighten this once those
-      # are cleaned up.
-      - run: cargo clippy --all-targets
+      # A gate. The pre-existing warnings this used to tolerate
+      # (zombie-process lints in the test helpers, an
+      # items-after-test-module nit) have been fixed, so the tree is clean
+      # and can be kept that way.
+      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -56,18 +54,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Per-language integration tests (rust_lang.rs, cpp_lang.rs, etc.) are
-      # gated on a real language server being installed and are supposed to
-      # skip cleanly when it isn't (see CONTRIBUTING.md) — but GitHub's
-      # hosted runner images ship some of these incidentally (rust-analyzer
-      # via the default rustup toolchain, clangd via Xcode Command Line
-      # Tools on macOS), so the gate sees "installed" and actually runs
-      # them against fixtures that were never meant to be CI-validated,
-      # producing exactly the kind of not-fully-ready flakiness this
-      # session already chased down once — reproduced live: this exact
-      # `cargo test --release` failed on ubuntu-latest (rust_lang.rs) and
-      # macos-latest (cpp_lang.rs) the first time this workflow ran.
-      # Scoped to what CONTRIBUTING.md's own local-setup instructions cover
-      # without a real dev environment: unit tests plus the integration
-      # binaries with no language-server dependency at all.
-      - run: cargo test --release --bin lsp --test help --test install --test locate --test schema --test server --test mcp_stdio
+      # Per-language integration tests (rust_lang.rs, cpp_lang.rs, etc.)
+      # are gated on a real language server being installed and skip
+      # cleanly when it isn't — but GitHub's hosted images ship some of
+      # them incidentally (rust-analyzer via the default rustup toolchain,
+      # clangd via Xcode Command Line Tools on macOS), so the gate sees
+      # "installed" and runs them against fixtures that were never meant to
+      # be CI-validated. Those stay off the list.
+      #
+      # The four bundled servers do NOT fall in that category: they are
+      # built from this repo by the same `cargo test` invocation, so their
+      # gate is always true and their tests are as deterministic as any
+      # unit test. They belong in CI and were only missing from it.
+      #
+      # `--lib` and the four `--bin lsp-*-lsp` targets are listed
+      # explicitly because `--bin lsp` alone runs neither the shared
+      # library's tests nor the servers' own.
+      - run: >
+          cargo test --release
+          --lib
+          --bin lsp
+          --bin lsp-json-lsp --bin lsp-css-lsp --bin lsp-html-lsp --bin lsp-bash-lsp
+          --test help --test install --test locate --test schema
+          --test server --test mcp_stdio --test web --test bash_lang

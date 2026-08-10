@@ -334,6 +334,27 @@ impl OutputFormat {
     }
 }
 
+fn render_symbols(symbols: &[DocumentSymbol], depth: usize) -> String {
+    let indent = "  ".repeat(depth);
+    let mut lines = Vec::new();
+    for sym in symbols {
+        let start = sym.range.start.line + 1;
+        let end = sym.range.end.line + 1;
+        lines.push(format!(
+            "{indent}{} {} [{}] (lines {start}–{end})",
+            icon(sym.kind),
+            sym.name,
+            symbol_kind_name(sym.kind)
+        ));
+        if let Some(children) = &sym.children {
+            if !children.is_empty() {
+                lines.push(render_symbols(children, depth + 1));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,25 +408,4 @@ mod tests {
         assert!(out.starts_with("1. /a.rs:1"));
         assert!(out.contains("2. /a.rs:1"));
     }
-}
-
-fn render_symbols(symbols: &[DocumentSymbol], depth: usize) -> String {
-    let indent = "  ".repeat(depth);
-    let mut lines = Vec::new();
-    for sym in symbols {
-        let start = sym.range.start.line + 1;
-        let end = sym.range.end.line + 1;
-        lines.push(format!(
-            "{indent}{} {} [{}] (lines {start}–{end})",
-            icon(sym.kind),
-            sym.name,
-            symbol_kind_name(sym.kind)
-        ));
-        if let Some(children) = &sym.children {
-            if !children.is_empty() {
-                lines.push(render_symbols(children, depth + 1));
-            }
-        }
-    }
-    lines.join("\n")
 }

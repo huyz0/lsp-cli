@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspCliConfig {
@@ -37,12 +36,7 @@ impl Default for LspCliConfig {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".lsp-cli")
-        .join("config.json")
-}
+pub use crate::paths::config_path;
 
 /// Load config, merging user overrides over defaults. Never errors: falls back
 /// to defaults on missing file or parse failure, matching utils/config.ts.

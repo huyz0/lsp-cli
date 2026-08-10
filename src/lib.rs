@@ -15,5 +15,6 @@
 //! Keep this small and dependency-light. It is compiled into five separate
 //! binaries.
 
+pub mod server_common;
 pub mod text_pos;
 pub mod uri;

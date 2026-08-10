@@ -9,7 +9,7 @@ mod support;
 
 use std::io::BufReader;
 use std::process::{ChildStderr, Command, Stdio};
-use support::{has_ts_server, lsp, ts_fixture};
+use support::{has_ts_server, isolated_home, lsp_in, ts_fixture};
 
 #[test]
 fn editing_an_unopened_file_triggers_a_watch_notification() {
@@ -18,11 +18,13 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
         return;
     }
 
-    let _ = lsp(&["server", "shutdown"]);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Its own state directory, so spawning and killing a daemon here
+    // cannot disturb another test binary — or the developer's own daemon.
+    let home = isolated_home("watcher");
 
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lsp"))
         .arg("--daemon")
+        .env("LSP_CLI_HOME", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -36,7 +38,7 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let file = ts_fixture("src/models.ts");
-    let start = lsp(&["server", "start", file.to_str().unwrap()]);
+    let start = lsp_in(&home, &["server", "start", file.to_str().unwrap()]);
     assert_eq!(start.exit_code, 0, "{}", start.stderr);
 
     // Edit a *different* file in the same project — one the server was
@@ -53,7 +55,6 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
 
     let _ = daemon.kill();
     let _ = daemon.wait();
-    let _ = lsp(&["server", "shutdown"]);
 
     assert!(
         found,

@@ -45,6 +45,7 @@ fn mcp_server_lists_tools_over_stdio() {
     assert!(tools.iter().any(|t| t["name"] == "outline"));
 
     let _ = child.kill();
+    let _ = child.wait(); // reap it; a bare kill() leaves a zombie
 }
 
 #[test]
@@ -83,6 +84,7 @@ fn mcp_server_executes_tool_over_stdio() {
     assert!(content[0]["text"].as_str().unwrap().contains("User"));
 
     let _ = child.kill();
+    let _ = child.wait(); // reap it; a bare kill() leaves a zombie
 }
 
 #[test]
@@ -106,4 +108,5 @@ fn mcp_server_reports_unknown_tool() {
     assert!(resp.get("error").is_some());
 
     let _ = child.kill();
+    let _ = child.wait(); // reap it; a bare kill() leaves a zombie
 }

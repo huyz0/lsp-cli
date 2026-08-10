@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -14,12 +14,7 @@ use crate::daemon::{socket_path, ManagedServerInfo};
 
 pub struct ManagerClient;
 
-fn spawn_lock_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".lsp-cli")
-        .join("manager.spawn.lock")
-}
+use crate::paths::spawn_lock_path;
 
 /// A lock file older than this is assumed to belong to a spawner that
 /// crashed (or was killed) before removing it, rather than one still

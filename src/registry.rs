@@ -201,6 +201,17 @@ pub fn is_bundled_server(installed_bin_name: &str) -> bool {
     installed_bin_name.starts_with("lsp-") && installed_bin_name.ends_with("-lsp")
 }
 
+/// Whether `language` is served by one of the bundled Rust-native servers
+/// under `src/servers/`. Those parse with tree-sitter synchronously inside
+/// the request handler, so unlike a third-party server they have no
+/// background indexing phase to wait out.
+pub fn is_bundled_language(language: &str) -> bool {
+    languages()
+        .iter()
+        .find(|l| l.name == language)
+        .is_some_and(|l| is_bundled_server(l.server_bin))
+}
+
 pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
     // deno relies on PATH; bundled Rust-native servers (src/servers/) ship
     // as sibling binaries right next to `lsp` itself and are resolved
@@ -307,12 +318,7 @@ pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
     None
 }
 
-pub fn default_install_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".lsp-cli")
-        .join("servers")
-}
+pub use crate::paths::install_dir as default_install_dir;
 
 #[cfg(test)]
 mod tests {

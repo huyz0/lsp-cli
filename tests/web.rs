@@ -1,5 +1,5 @@
 mod support;
-use support::{has_css_server, has_html_server, has_json_server, lsp, lsp_json, web_fixture};
+use support::{has_css_server, has_html_server, has_json_server, lsp_json, web_fixture};
 
 /// The full `cargo test` run touches many different languages across many
 /// test binaries, and — now that navigation commands reuse warm
@@ -17,8 +17,12 @@ use support::{has_css_server, has_html_server, has_json_server, lsp, lsp_json, w
 /// verified reliable in isolation — not on whatever every earlier test file
 /// left running.
 fn reset_daemon() {
-    let _ = lsp(&["server", "shutdown"]);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Intentionally empty. This used to shut the daemon down to get a
+    // clean slate from whatever earlier test *files* had left running —
+    // which also killed the developer's own daemon. Each test binary now
+    // gets its own LSP_CLI_HOME (see tests/support), so the isolation this
+    // was reaching for is structural and no shutdown is needed. Kept as a
+    // no-op so the call sites still read as "this file starts clean".
 }
 
 #[test]

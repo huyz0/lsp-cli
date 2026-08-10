@@ -2,7 +2,8 @@
 //! built alongside `lsp` itself — see `src/servers/json_lsp.rs`'s module
 //! doc comment for the shared architecture (bundled `[[bin]]` binary,
 //! `lsp-server`/`lsp-types` for the protocol, no download/npm/Node.js
-//! runtime dependency).
+//! runtime dependency). Everything language-agnostic lives in
+//! `lsp::server_common`.
 //!
 //! Parsing is `tree-sitter-css`. Its grammar shape (confirmed by dumping a
 //! real parse tree's s-expression rather than guessed) puts each
@@ -18,193 +19,38 @@
 //! them under any single selector would misrepresent a shared rule as a
 //! duplicated per-selector tree.
 //!
-//! Scope: `textDocument/documentSymbol` and a minimal `textDocument/hover`.
-//! No diagnostics, no completion, no property-value validation.
+//! Scope: `textDocument/documentSymbol` and the shared minimal
+//! `textDocument/hover`. No diagnostics, no completion, no property-value
+//! validation.
 
-use std::collections::HashMap;
 use std::error::Error;
 
-use lsp_server::{
-    Connection, ErrorCode, ExtractError, Message, Notification, Request, RequestId, Response,
-};
-use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-};
-use lsp_types::request::{DocumentSymbolRequest, HoverRequest};
-use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position, Range,
-    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
-};
+use lsp::server_common::{find_child_by_kind, run, Document, Server, MAX_SYMBOL_DEPTH};
+use lsp_types::{DocumentSymbol, SymbolKind};
 
-fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
-    if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("lsp-css-lsp {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+struct CssServer;
+
+impl Server for CssServer {
+    fn name(&self) -> &'static str {
+        "lsp-css-lsp"
     }
 
-    eprintln!("lsp-css-lsp starting");
-    let (connection, io_threads) = Connection::stdio();
+    fn language(&self) -> tree_sitter::Language {
+        tree_sitter_css::LANGUAGE.into()
+    }
 
-    let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-        document_symbol_provider: Some(OneOf::Left(true)),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        ..Default::default()
-    };
-    let init_params = connection.initialize(serde_json::to_value(capabilities)?)?;
-    main_loop(connection, init_params)?;
-    io_threads.join()?;
-    eprintln!("lsp-css-lsp shutting down");
-    Ok(())
-}
-
-struct Docs {
-    text: HashMap<Uri, String>,
-}
-
-fn main_loop(
-    connection: Connection,
-    _init_params: serde_json::Value,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let mut docs = Docs {
-        text: HashMap::new(),
-    };
-
-    for msg in &connection.receiver {
-        match msg {
-            Message::Request(req) => {
-                if connection.handle_shutdown(&req)? {
-                    return Ok(());
-                }
-                let req = match extract::<DocumentSymbolRequest>(req) {
-                    Ok((id, params)) => {
-                        let result = handle_document_symbol(&docs, &params);
-                        respond(&connection, id, result)?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let req = match extract::<HoverRequest>(req) {
-                    Ok((id, params)) => {
-                        let result = handle_hover(&docs, &params);
-                        respond(&connection, id, result)?;
-                        continue;
-                    }
-                    Err(req) => req,
-                };
-                let resp = Response::new_err(
-                    req.id,
-                    ErrorCode::MethodNotFound as i32,
-                    format!("Unhandled method: {}", req.method),
-                );
-                connection.sender.send(Message::Response(resp))?;
-            }
-            Message::Notification(not) => {
-                handle_notification(&mut docs, not);
-            }
-            Message::Response(_) => {}
+    fn document_symbols(&self, doc: &Document) -> Vec<DocumentSymbol> {
+        let Some(tree) = doc.tree.as_ref() else {
+            return vec![];
+        };
+        let root = tree.root_node();
+        let mut out = Vec::new();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            out.extend(symbols_for_node(doc, &child, 0));
         }
+        out
     }
-    Ok(())
-}
-
-fn extract<R>(req: Request) -> Result<(RequestId, R::Params), Request>
-where
-    R: lsp_types::request::Request,
-    R::Params: serde::de::DeserializeOwned,
-{
-    match req.extract::<R::Params>(R::METHOD) {
-        Ok(v) => Ok(v),
-        Err(ExtractError::MethodMismatch(req)) => Err(req),
-        Err(ExtractError::JsonError { method, error }) => {
-            panic!("malformed params for {method}: {error}")
-        }
-    }
-}
-
-fn respond(
-    connection: &Connection,
-    id: RequestId,
-    result: impl serde::Serialize,
-) -> Result<(), Box<dyn Error + Sync + Send>> {
-    connection
-        .sender
-        .send(Message::Response(Response::new_ok(id, result)))?;
-    Ok(())
-}
-
-fn handle_notification(docs: &mut Docs, not: Notification) {
-    match not.method.as_str() {
-        DidOpenTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(not.params) {
-                docs.text
-                    .insert(params.text_document.uri, params.text_document.text);
-            }
-        }
-        DidChangeTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(not.params) {
-                if let Some(change) = params.content_changes.into_iter().last() {
-                    docs.text.insert(params.text_document.uri, change.text);
-                }
-            }
-        }
-        DidCloseTextDocument::METHOD => {
-            if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(not.params) {
-                docs.text.remove(&params.text_document.uri);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn parse(text: &str) -> Option<tree_sitter::Tree> {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_css::LANGUAGE.into())
-        .ok()?;
-    parser.parse(text, None)
-}
-
-/// See json_lsp.rs's identical helper for why this matters: byte-offset
-/// tree-sitter `Point`s need real UTF-16-code-unit conversion to be a
-/// spec-compliant `Position`, not the char-count approximation this
-/// codebase's client side (`locate.rs`) allows itself when talking to
-/// *other* people's servers.
-fn point_to_position(text: &str, point: tree_sitter::Point) -> Position {
-    let line = text.lines().nth(point.row).unwrap_or("");
-    let byte_col = point.column.min(line.len());
-    let utf16_col: usize = line[..byte_col].chars().map(|c| c.len_utf16()).sum();
-    Position {
-        line: point.row as u32,
-        character: utf16_col as u32,
-    }
-}
-
-fn node_range(text: &str, node: &tree_sitter::Node) -> Range {
-    Range {
-        start: point_to_position(text, node.start_position()),
-        end: point_to_position(text, node.end_position()),
-    }
-}
-
-fn position_to_byte(text: &str, pos: Position) -> usize {
-    let mut byte_offset = 0;
-    for (i, line) in text.split('\n').enumerate() {
-        if i as u32 == pos.line {
-            let mut utf16_count = 0u32;
-            for (byte_idx, c) in line.char_indices() {
-                if utf16_count >= pos.character {
-                    return byte_offset + byte_idx;
-                }
-                utf16_count += c.len_utf16() as u32;
-            }
-            return byte_offset + line.len();
-        }
-        byte_offset += line.len() + 1;
-    }
-    text.len()
 }
 
 /// Classifies one selector node (a direct child of a `selectors` node) into
@@ -225,7 +71,7 @@ fn selector_kind(node: &tree_sitter::Node) -> SymbolKind {
     }
 }
 
-fn at_rule_name(text: &str, node: &tree_sitter::Node) -> String {
+fn at_rule_name(doc: &Document, node: &tree_sitter::Node) -> String {
     // `media_statement`/`supports_statement`'s body is a `block` child;
     // `keyframes_statement`'s is a `keyframe_block_list` child instead
     // (confirmed against a real parse tree, not assumed) — without
@@ -241,20 +87,11 @@ fn at_rule_name(text: &str, node: &tree_sitter::Node) -> String {
             break;
         }
     }
-    text[node.start_byte()..end_byte].trim().to_string()
+    doc.text[node.start_byte()..end_byte].trim().to_string()
 }
 
-fn find_child_by_kind<'a>(
-    node: &tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    let found = node.children(&mut cursor).find(|c| c.kind() == kind);
-    found
-}
-
-#[allow(deprecated)] // `DocumentSymbol.deprecated` has no replacement in lsp_types; every constructor site sets it None the same way.
-fn symbols_for_rule_set(text: &str, rule_set: &tree_sitter::Node) -> Vec<DocumentSymbol> {
+#[allow(deprecated)] // `DocumentSymbol.deprecated` has no replacement in lsp_types.
+fn symbols_for_rule_set(doc: &Document, rule_set: &tree_sitter::Node) -> Vec<DocumentSymbol> {
     let Some(selectors) = rule_set
         .child_by_field_name("selectors")
         .or_else(|| find_child_by_kind(rule_set, "selectors"))
@@ -265,7 +102,7 @@ fn symbols_for_rule_set(text: &str, rule_set: &tree_sitter::Node) -> Vec<Documen
     let mut out = Vec::new();
     let mut cursor = selectors.walk();
     for sel in selectors.named_children(&mut cursor) {
-        let name = text[sel.byte_range()].to_string();
+        let name = doc.slice(&sel).to_string();
         if name.trim().is_empty() {
             continue;
         }
@@ -275,8 +112,8 @@ fn symbols_for_rule_set(text: &str, rule_set: &tree_sitter::Node) -> Vec<Documen
             kind: selector_kind(&sel),
             tags: None,
             deprecated: None,
-            range: node_range(text, rule_set),
-            selection_range: node_range(text, &sel),
+            range: doc.node_range(rule_set),
+            selection_range: doc.node_range(&sel),
             children: None,
         });
     }
@@ -290,43 +127,45 @@ fn symbols_for_rule_set(text: &str, rule_set: &tree_sitter::Node) -> Vec<Documen
 /// they're deliberately not descended into; there's nothing selector-like
 /// to extract from them.
 #[allow(deprecated)]
-fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol> {
+fn symbols_for_node(doc: &Document, node: &tree_sitter::Node, depth: usize) -> Vec<DocumentSymbol> {
+    if depth >= MAX_SYMBOL_DEPTH {
+        return vec![];
+    }
     match node.kind() {
-        "rule_set" => symbols_for_rule_set(text, node),
+        "rule_set" => symbols_for_rule_set(doc, node),
         "media_statement" | "supports_statement" => {
-            let name = at_rule_name(text, node);
+            let name = at_rule_name(doc, node);
             let mut children = Vec::new();
-            let mut cursor = node.walk();
-            if let Some(block) = node.children(&mut cursor).find(|c| c.kind() == "block") {
+            if let Some(block) = find_child_by_kind(node, "block") {
                 let mut bcursor = block.walk();
                 for child in block.named_children(&mut bcursor) {
-                    children.extend(symbols_for_node(text, &child));
+                    children.extend(symbols_for_node(doc, &child, depth + 1));
                 }
             }
-            if children.is_empty() {
-                return vec![];
-            }
+            // An at-rule whose body holds no selector rules (only
+            // declarations, or nothing) still belongs in the outline —
+            // dropping it hid the `@media` query itself, which is the part
+            // a reader is looking for.
             vec![DocumentSymbol {
                 name,
                 detail: None,
                 kind: SymbolKind::NAMESPACE,
                 tags: None,
                 deprecated: None,
-                range: node_range(text, node),
-                selection_range: node_range(text, node),
-                children: Some(children),
+                range: doc.node_range(node),
+                selection_range: doc.node_range(node),
+                children: (!children.is_empty()).then_some(children),
             }]
         }
         "keyframes_statement" => {
-            let name = at_rule_name(text, node);
             vec![DocumentSymbol {
-                name,
+                name: at_rule_name(doc, node),
                 detail: None,
                 kind: SymbolKind::NAMESPACE,
                 tags: None,
                 deprecated: None,
-                range: node_range(text, node),
-                selection_range: node_range(text, node),
+                range: doc.node_range(node),
+                selection_range: doc.node_range(node),
                 children: None,
             }]
         }
@@ -334,38 +173,82 @@ fn symbols_for_node(text: &str, node: &tree_sitter::Node) -> Vec<DocumentSymbol>
     }
 }
 
-fn handle_document_symbol(docs: &Docs, params: &DocumentSymbolParams) -> DocumentSymbolResponse {
-    let uri = &params.text_document.uri;
-    let Some(text) = docs.text.get(uri) else {
-        return DocumentSymbolResponse::Nested(vec![]);
-    };
-    let Some(tree) = parse(text) else {
-        return DocumentSymbolResponse::Nested(vec![]);
-    };
-    let root = tree.root_node();
-    let mut out = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        out.extend(symbols_for_node(text, &child));
-    }
-    DocumentSymbolResponse::Nested(out)
+fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+    run(CssServer)
 }
 
-fn handle_hover(docs: &Docs, params: &HoverParams) -> Option<Hover> {
-    let uri = &params.text_document_position_params.text_document.uri;
-    let text = docs.text.get(uri)?;
-    let tree = parse(text)?;
-    let byte = position_to_byte(text, params.text_document_position_params.position);
-    let node = tree.root_node().descendant_for_byte_range(byte, byte)?;
-    let snippet = &text[node.byte_range()];
-    if snippet.trim().is_empty() {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outline(text: &str) -> Vec<DocumentSymbol> {
+        CssServer.document_symbols(&Document::for_test(text, CssServer.language()))
     }
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::PlainText,
-            value: snippet.to_string(),
-        }),
-        range: Some(node_range(text, &node)),
-    })
+
+    #[test]
+    fn each_comma_separated_selector_gets_its_own_symbol() {
+        let syms = outline(".card, #header { color: red; }");
+        let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [".card", "#header"]);
+        assert_eq!(syms[0].kind, SymbolKind::CLASS);
+        assert_eq!(syms[1].kind, SymbolKind::FIELD);
+    }
+
+    #[test]
+    fn tag_selectors_are_structs() {
+        let syms = outline("div { color: red; }");
+        assert_eq!(syms[0].name, "div");
+        assert_eq!(syms[0].kind, SymbolKind::STRUCT);
+    }
+
+    #[test]
+    fn media_queries_nest_their_rules() {
+        let syms = outline("@media (max-width: 600px) { .a { color: red; } }");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "@media (max-width: 600px)");
+        assert_eq!(syms[0].kind, SymbolKind::NAMESPACE);
+        let kids = syms[0].children.as_ref().unwrap();
+        assert_eq!(kids[0].name, ".a");
+    }
+
+    #[test]
+    fn an_at_rule_with_no_nested_rules_is_still_listed() {
+        // It used to be dropped entirely, hiding the query itself.
+        let syms = outline("@media print { }");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "@media print");
+        assert!(syms[0].children.is_none());
+    }
+
+    #[test]
+    fn keyframes_name_stops_before_its_body() {
+        // The keyframes body is `keyframe_block_list`, not `block` — the
+        // bug this special case exists for was folding the whole body into
+        // the name.
+        let syms = outline("@keyframes spin { from { opacity: 0; } to { opacity: 1; } }");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "@keyframes spin");
+    }
+
+    #[test]
+    fn combinator_selectors_stay_one_symbol() {
+        let syms = outline("div > p.foo { color: red; }");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "div > p.foo");
+    }
+
+    #[test]
+    fn malformed_css_does_not_panic() {
+        let _ = outline("");
+        let _ = outline(".a { color:");
+        let _ = outline("}}}{{{");
+    }
+
+    #[test]
+    fn positions_are_utf16_columns() {
+        // The emoji in the leading comment is 2 UTF-16 units but 1 char,
+        // so `.b` starts at UTF-16 column 9 where a char count gives 8.
+        let syms = outline("/* 😀 */ .b { color: red; }");
+        assert_eq!(syms[0].selection_range.start.character, 9);
+    }
 }
