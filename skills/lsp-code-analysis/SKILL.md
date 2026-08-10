@@ -1,331 +1,222 @@
 ---
 name: lsp-code-analysis
-description: Code intelligence via LSP: definitions, references, outlines, docs, call/type hierarchy, diagnostics, rename. Default to this over grep/read for code understanding tasks. It returns just the matching symbol or location instead of a full file or a page of grep noise to filter by hand, and does what grep/read can't: verify a file compiles, trace real call sites, safely rename a symbol across every file that uses it.
+description: Answers structural questions about a codebase by querying a real language server through the `lsp` CLI - where a symbol is defined, what references or calls it, what a file contains, what a symbol's type and docs are, whether a file still compiles, and renaming a symbol across every file that uses it. Use when the user asks "where is X defined", "who calls X", "find all usages of X", "what's in this file", "rename X everywhere", "does this still compile", or when tracing impact before changing a symbol. Supports TypeScript/JavaScript, Deno, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Lua, Zig, Bash, HTML, CSS and JSON.
 ---
 
-# LSP Code Analysis
+# LSP code analysis
 
-## Prerequisites
+The `lsp` CLI answers questions about code by asking a language server,
+so results are based on what the compiler resolves rather than on text
+matching. A grep for `User` cannot tell a class from an import from an
+unrelated local; `lsp definition` can.
 
-The `lsp` binary must be installed. Check with:
+Linux and macOS only. If `lsp --version` fails, the tool is not available
+here and everything below is moot.
+
+## When to use it, and when not to
+
+Reach for `lsp` when the question is about a **symbol**:
+
+| Question | Command |
+|---|---|
+| What's in this file? | `lsp outline <file>` |
+| Where is X defined? | `lsp definition <file> --scope X` |
+| What uses X? | `lsp reference <file> --scope X` |
+| What calls X? (call sites only) | `lsp calls <file> --scope X` |
+| What extends X? | `lsp hierarchy <file> --scope X` |
+| What is X's type and docs? | `lsp doc <file> --scope X` |
+| Show me X's source | `lsp symbol <file> --scope X` |
+| Does this file compile? | `lsp diagnostics <file>` |
+| Where is X, anywhere? | `lsp search "X"` |
+| Rename X everywhere | `lsp rename <file> --scope X --new-name Y` |
+
+The file-scoped commands all need a file path. When you do not have one
+yet, start with `lsp search` to find the symbol, then use the file it
+reports.
+
+Use grep or read instead when:
+
+- You are looking for **text**, not a symbol: a string literal, a comment,
+  a config value, a log line, prose in a README.
+- You want **every textual occurrence**, including comments and strings.
+  `reference` deliberately returns only resolved usages.
+- The file is small and you want all of it anyway. `outline` plus a
+  couple of `symbol` calls costs more than one read of a 100-line file.
+- The language is not in the list in the frontmatter.
+
+**Each command costs a few seconds.** Warm calls carry a fixed ~3s wait
+for the server to process the file; the first call against a project also
+waits for its initial index, which is seconds for TypeScript and can be
+much longer for rust-analyzer on a large workspace. Bundled servers
+(Bash, HTML, CSS, JSON) have no such wait. So `lsp` wins decisively on a
+large file or a cross-file question, and loses to `read` on a small one.
+Do not sweep twenty symbols one at a time.
+
+## Selecting a symbol: `--scope` and `--find`
+
+`definition`, `reference`, `doc`, `symbol`, `calls`, `hierarchy`,
+`rename` and `locate` take `--scope`. `outline`, `diagnostics` and
+`search` do not: the first two describe a whole file, and `search` takes a
+query instead.
+
+| `--scope` | Means |
+|---|---|
+| `42` | Line 42 |
+| `10,20` | Lines 10 to 20 |
+| `10,0` | Line 10 to end of file |
+| `MyClass` | The declaration of `MyClass` |
+| `MyClass.method` | `method` inside `MyClass` |
+
+`--find <text>` narrows to an exact position inside that scope. It
+ignores whitespace differences, and `<|>` marks where the cursor should
+sit:
 
 ```bash
-lsp --version
-```
-
-If missing, install it:
-
-```bash
-brew install huyz0/tap/lsp-cli
-```
-
-No Homebrew: `curl -fsSL https://raw.githubusercontent.com/huyz0/lsp-cli/main/install.sh | sh`,
-or build from source with `cargo build --release` (binary at `./target/release/lsp`).
-
-Language servers are managed separately, per project language:
-
-```bash
-lsp install --list      # see what's installed for every supported language
-lsp install typescript  # install one, e.g. TypeScript/JS
-```
-
-Java additionally needs a JDK already on the machine (sdkman, `$JAVA_HOME`,
-or `java` on `PATH`); `lsp install java` won't install one for you.
-
-**Auto-start**: A language server starts automatically on the first navigation
-command and stays warm in a background daemon, reused across calls (even
-across separate CLI invocations) until it's been idle for 10 minutes. You do
-not need to call `lsp server start` manually.
-
-**deno** is detected on `PATH` and used if present, but never auto-installed.
-Install it yourself from https://deno.land if needed.
-
-## Commands
-
-All commands output JSON by default (optimized for agents). Use `--output
-markdown` for human-readable output, and `--dry-run` to preview the LSP
-request without sending it. Every flag has a description in `--help`.
-
-### `lsp outline <file>`
-
-Get a file's symbol structure without reading its full implementation.
-
-```bash
-lsp outline src/models.ts
-lsp outline src/models.ts --all   # include fields and parameters
-```
-
-**Use this first** when exploring an unfamiliar file.
-
-### `lsp definition <file> --scope <symbol>`
-
-Navigate to where a symbol is defined.
-
-```bash
-lsp definition src/service.ts --scope createUser
 lsp definition src/service.ts --scope 12 --find "<|>User"
-lsp definition src/service.ts --scope createUser --mode type_definition
+lsp doc src/models.ts --scope 22 --find "return <|>result"
 ```
 
-Modes: `definition` (default), `declaration`, `type_definition`
-
-### `lsp reference <file> --scope <symbol>`
-
-Find all usages of a symbol across the workspace.
+When a command reports "Symbol not found" or resolves somewhere
+unexpected, run `lsp locate` with the same arguments. It resolves the
+position locally, with no language server involved, and prints the line
+and column it picked with surrounding context:
 
 ```bash
-lsp reference src/models.ts --scope User
-lsp reference src/models.ts --scope User --mode implementations
-lsp reference src/models.ts --scope User --max-items 20 --start-index 0 --pagination-id ref1
+lsp locate src/models.ts --scope User --find "greet"
 ```
 
-### `lsp doc <file> --scope <symbol>`
+Symbol-path scopes are matched with per-language declaration patterns, not
+a parser. They handle the common declaration forms; if one does not
+resolve, fall back to a line number from `outline`.
 
-View type signature and documentation for a symbol.
+## Output
+
+JSON by default, which is what to parse. `--output markdown` is for
+showing a human. `--dry-run` prints the request that would be sent without
+sending it.
+
+`install` and `schema` take neither flag. `locate` and `server` take
+`--output` but not `--dry-run`.
+
+Every command has a short alias, which is worth using: `o`, `def`, `ref`,
+`d`, `diag`, `c` (calls), `th` (hierarchy), `rn` (rename), `sym`, `l`
+(locate), `s` (search), `i` (install), `srv` (server). `--project` is `-p`
+everywhere it exists, which is everything except `locate`.
+
+## Commands worth knowing in detail
+
+Run `lsp <command> --help` for the full flag list, or `lsp schema
+[command]` for a machine-readable JSON Schema. Only the parts that are
+easy to get wrong are spelled out here.
+
+### `rename`
+
+The only command that writes files. Without `--apply` it previews and
+touches nothing.
 
 ```bash
-lsp doc src/models.ts --scope User.greet
-lsp doc src/models.ts --scope 22 --find "<|>greet"
+lsp rename src/models.ts --scope User.greet --new-name sayHello          # preview
+lsp rename src/models.ts --scope User.greet --new-name sayHello --apply  # write
 ```
 
-### `lsp calls <file> --scope <symbol>`
+Always preview first and check the file list and edit count. Completeness
+depends on the server having indexed the project, and on dynamically typed
+languages being able to prove two usages are the same symbol at all. An
+incomplete rename leaves the codebase half-renamed without announcing it,
+which is worse than a wrong read-only answer. If the output reports
+skipped file operations, the rename also needed to move or create a file
+and is definitely incomplete. After `--apply`, search the old name to
+confirm nothing was missed.
 
-Find who calls, or is called by, a symbol.
+### `reference` and `search` are paginated
+
+Default page size is 20, configurable as `defaultMaxItems`.
 
 ```bash
-lsp calls src/service.ts --scope createUser                       # who calls createUser (default: incoming)
-lsp calls src/service.ts --scope createUser --direction outgoing  # what createUser calls
+lsp reference src/models.ts --scope User --max-items 20 --start-index 20
 ```
 
-More precise than `reference` for impact analysis. It only follows actual
-call sites, not every textual usage (imports, type annotations, reads/writes
-of a variable with the same name).
+`search`'s JSON reports `total` and `startIndex`, so you can tell whether
+more results exist. **`reference`'s JSON does not**: its "N more
+results" notice goes to stderr. If you are capturing stdout only, compare the
+number of locations against `--max-items` to detect truncation.
 
-### `lsp hierarchy <file> --scope <symbol>`
+`--pagination-id` is accepted but does nothing; each call re-queries.
 
-Find supertypes or subtypes of a class/interface: the type-level sibling
-of `calls`' call hierarchy.
+### `search`
 
 ```bash
-lsp hierarchy src/models.ts --scope User                        # what extends/implements User (default: subtypes)
-lsp hierarchy src/models.ts --scope User --direction supertypes # what User extends/implements
+lsp search "User" --kinds class --kinds interface
 ```
 
-### `lsp diagnostics <file>`
+`--kinds` is repeatable. Valid values: `class`, `interface`, `function`,
+`method`, `variable`, `constant`, `enum`, `struct`, and the other LSP
+symbol kinds. An invalid one is an error, not an empty result.
 
-Report compiler/type-checker errors and warnings for a file.
+`search` needs a project to search. Run it from inside the project, or
+pass `--project <path>`. It uses the language server's workspace symbol
+index when one answers, and falls back to a built-in text index otherwise.
+The fallback finds fewer things and ranks them less precisely, so prefer
+running from a real project root.
+
+### `diagnostics`
 
 ```bash
 lsp diagnostics src/service.ts
 ```
 
-**Run this after editing a file** to check it still compiles/typechecks,
-instead of invoking the project's own build tool. Not every language server
-supports this yet. If it fails, the error message says so explicitly.
+Run after editing a file to check it still typechecks, instead of invoking
+the project's build tool. Not every server supports it; the error says so
+explicitly when the request itself failed. An empty list means no problems
+found, which is not the same as unsupported.
 
-### `lsp rename <file> --scope <symbol> --new-name <name>`
+### `install` and `server`
 
-Rename a symbol across every file that references it. The only command in
-this tool that writes files.
-
-```bash
-lsp rename src/models.ts --scope User.greet --new-name sayHello              # preview only, writes nothing
-lsp rename src/models.ts --scope User.greet --new-name sayHello --apply      # writes the edits to disk
-```
-
-**Always run the preview first** (the default, no `--apply`) and check the
-edit count and file list before applying. Completeness depends on the
-language server having fully indexed the project, and on dynamically-typed
-languages (Python, Ruby) being able to prove two usages are the same symbol
-at all. An incomplete rename applies real edits and can leave the codebase
-silently half-renamed, unlike a wrong read-only result, which is just
-annoying to retry. After `--apply`, re-run `search`/`reference` for the old
-name to confirm nothing was missed.
-
-### `lsp symbol <file> --scope <symbol>`
-
-Get the full source code of a symbol.
+Language servers install themselves on first use. You should not normally
+need these.
 
 ```bash
-lsp symbol src/models.ts --scope User.greet
-lsp symbol src/models.ts --scope 22
+lsp install --list          # what's installed
+lsp install typescript      # one language
+lsp install --all           # everything
+lsp install rust --update   # reinstall
+
+lsp server list             # what's running, with pid and idle time
+lsp server stop <project>   # force a respawn on the next call
+lsp server shutdown         # stop the daemon itself
 ```
 
-Prefer this over `read` for targeted code inspection: avoids loading entire files.
+Java needs a JDK already present. Deno is used if it is on `PATH` but is
+never installed for you.
 
-### `lsp search "<query>"`
+## How it behaves
 
-Find symbols by name across the workspace.
+A language server starts on first use and stays warm in a background
+daemon, shared across CLI invocations, until it has been idle for ten
+minutes. While it is warm, edits made anywhere in the project are picked
+up automatically, so you do not need to restart anything after editing.
 
-```bash
-lsp search "User"
-lsp search "create" --kinds function
-lsp search "User" --max-items 20 --start-index 0 --pagination-id s1
+Configuration lives in `~/.lsp-cli/config.json`, all durations in
+**seconds**:
+
+```json
+{ "idleTimeout": 600, "managerTimeout": 60, "defaultMaxItems": 20 }
 ```
-
-Kind values: `class`, `interface`, `function`, `method`, `variable`, `constant`, `enum`, `struct`
-
-**In a multi-project workspace** (a monorepo with several independent
-projects, same stack or mixed), run `search` from inside the specific
-project you care about, or pass `--project <path>`, not the workspace
-root. It auto-detects one project from the current directory and queries
-that project's real LSP server; from a workspace root with no project of
-its own, that detection typically finds nothing and it silently falls back
-to a text-based index built across every file in every subproject, mixed
-languages included, which is fine for a rough lookup but loses LSP
-precision (exact symbol matches, not just name matches). File-scoped
-commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `calls`,
-`hierarchy`, `diagnostics`, `rename`) don't have this problem: point one
-at any file and it auto-resolves the correct project and language server
-from that file's own location, regardless of how many other projects
-share the workspace.
-
-### `lsp locate <file> --scope <scope>`
-
-Verify that a scope+find pattern resolves correctly before using it in other commands. Runs purely locally: no LSP server, no daemon, no network. Use this whenever `--find` isn't matching what you expect, instead of debugging by trial and error against the LSP commands.
-
-```bash
-lsp locate src/models.ts --scope User
-lsp locate src/models.ts --scope 15 --find "return <|>result"
-```
-
-### `lsp server list`
-
-Show running servers, their PID, and idle time.
-
-```bash
-lsp server list
-```
-
-## Schema & introspection
-
-Agents can dynamically list commands and retrieve the exact JSON Schema for their input arguments using the `schema` command instead of relying on this documentation:
-
-```bash
-lsp schema              # list all endpoint schemas
-lsp schema definition   # show the input schema for `definition`
-```
-
-## Locate syntax
-
-The `--scope` and `--find` options are shared across all navigation commands (`outline`, `definition`, `reference`, `doc`, `symbol`, `calls`, `hierarchy`, `rename`, `locate`):
-
-| Format | Meaning |
-|--------|---------|
-| `42` | Line 42 |
-| `10,20` | Lines 10-20 |
-| `MyClass` | Top-level symbol named `MyClass` |
-| `MyClass.method` | Nested symbol |
-| `10,0` | Line 10 to end of file |
-
-`--find <pattern>`: Searches for a text pattern within the scope.
-- Whitespace-insensitive (extra spaces ignored)
-- `<|>` marks the exact cursor position within the pattern
-- If omitted, the position defaults to the start of `--scope`
-
-If a command errors with "Symbol not found" or returns unexpected results,
-run `lsp locate` with the same `--scope`/`--find` first. It's free (no LSP
-round trip) and will show exactly what position it resolved to.
-
-## Pagination
-
-For `reference` and `search`:
-
-```bash
-# Page 1
-lsp reference src/models.ts --scope User --max-items 20 --pagination-id task123
-
-# Page 2
-lsp reference src/models.ts --scope User --max-items 20 --start-index 20 --pagination-id task123
-```
-
-`--pagination-id` is accepted for interface compatibility but each call still
-queries the LSP server fresh. There's no server-side cursor to invalidate,
-so re-running page 1 after other edits is safe.
-
-## Recommended workflows
-
-### Understanding an unfamiliar file
-
-```bash
-# 1. Get structure without reading implementation
-lsp outline src/models.ts
-
-# 2. Inspect signatures of interesting symbols
-lsp doc src/models.ts --scope User.greet
-
-# 3. Navigate to dependencies
-lsp definition src/models.ts --scope User
-
-# 4. Find where it's used
-lsp reference src/models.ts --scope User
-```
-
-### Change impact analysis
-
-```bash
-# Find all callers of a function
-lsp reference src/service.ts --scope createUser
-
-# Trace data flow: find where the type is used
-lsp search "User" --kinds class
-lsp reference src/models.ts --scope User
-
-# Or, for call sites specifically (excludes non-call usages)
-lsp calls src/service.ts --scope createUser
-```
-
-### Debugging
-
-```bash
-# Find symbol workspace-wide
-lsp search "processData"
-
-# Verify the definition
-lsp definition src/service.ts --scope processData
-
-# Trace all callers
-lsp reference src/service.ts --scope processData
-```
-
-## Tool selection guide
-
-| Task | Traditional | Recommended |
-|------|-------------|-------------|
-| Understand a file | `read <file>` | `lsp outline <file>` |
-| Find where X is defined | `grep -r "X"` | `lsp definition <file> --scope X` |
-| Find usages of X | `grep -r "X"` | `lsp reference <file> --scope X` |
-| Find callers of X | `grep -r "X("` | `lsp calls <file> --scope X` |
-| View docs/types | `read <file>` | `lsp doc <file> --scope X` |
-| Read a function | `read <file>` | `lsp symbol <file> --scope X` |
-| Find a class | `grep -r "class X"` | `lsp search "X" --kinds class` |
-
-Exception: literal string searches, comments, and non-code content (README prose, config values, log output) still go through `read`/`grep`.
-
-## Behavior notes
-
-- **Warm servers**: navigation commands proxy through a background daemon and
-  reuse a live language server for the same project across calls (default
-  10-minute idle timeout, configurable via `~/.lsp-cli/config.json`'s
-  `idleTimeout`, in milliseconds). The first call for a project pays LSP
-  startup cost; subsequent calls are fast.
-- **File watching**: while a server is warm, external edits to files in its
-  project are detected automatically and pushed to the server, so you don't
-  need to restart the server after editing a file outside of the command
-  you're running.
-- If a server seems stuck or stale after an external process crashed it,
-  `lsp server stop <project>` (or `--all`) forces a clean respawn on the next
-  call.
 
 ## Troubleshooting
 
-| Symptom | Try this |
+| Symptom | Cause and fix |
 |---|---|
-| "Symbol not found" or wrong location resolved | Run `lsp locate <file> --scope ... --find ...` with the same arguments (see "Locate syntax" above for why). |
-| "Cannot detect project root" | The file isn't under a recognized root marker (package.json, Cargo.toml, go.mod, etc). Pass `--project <path>` explicitly. |
-| Command errors with an "Unknown mode"/"Unknown --output value" message | The value you passed is invalid and was rejected. These commands fail loudly rather than silently falling back to a default, so check the message's list of valid values. |
-| Results look stale after you (or another process) edited a file | Should self-correct: warm servers watch their project directory and get notified of external edits automatically. If it doesn't, `lsp server stop <project>` forces a clean respawn. |
-| A navigation command hangs or a server seems wedged | `lsp server list` to see what's running and its PID, then `lsp server stop <project>` (or `--all`) to force a respawn on the next call. |
-| `lsp diagnostics` returns no items but you know there's an error | Not every language server supports this yet (the error message says so explicitly if the request itself failed). If it returned an *empty* list instead of erroring, the server may not have finished analyzing yet. This is best-effort and doesn't retry. |
-| Auto-install fails for `java` | Requires a JDK already present via sdkman, `$JAVA_HOME`, or `java` on `PATH`. This tool won't install a JDK for you. |
-| `deno` isn't detected | It's never auto-installed, must already be on `PATH`. Install it from https://deno.land. |
+| "Symbol not found", or a result from the wrong place | Run `lsp locate` with the same `--scope`/`--find` to see what position it resolved to. If a symbol path does not resolve, use a line number from `outline`. |
+| "Cannot detect project root" | The file is not under a recognized root marker. Pass `--project <path>`. |
+| "Unsupported file type" | The extension is not one of the supported languages. Use grep. |
+| `Unknown mode` / `Unknown direction` / `Unknown --kinds value` | The value is invalid and was rejected rather than defaulted. The message lists what is valid. `calls` uses `incoming`/`outgoing`; `hierarchy` uses `subtypes`/`supertypes`. |
+| A command hangs, or results look stale | `lsp server list` to see what is running, then `lsp server stop <project>` to force a respawn. `lsp server shutdown` if the daemon itself is wedged. |
+| `hierarchy` fails on TypeScript | `typescript-language-server` does not implement type hierarchy. Not a bug in this tool. |
+| `outline --scope` is rejected | `outline` describes a whole file. Use `lsp symbol` for one symbol. |
+
+## MCP
+
+`lsp mcp` runs the CLI as an MCP server over stdio, exposing the same
+commands as tools. Use this instead of shell invocations if the host
+supports it.
