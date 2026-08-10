@@ -303,3 +303,51 @@ async fn raw_request_once(method: &str, path: &str, body: Option<&str>) -> Resul
 
     Ok((status, resp_body))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `spawn_lock_is_stale` guards the fix for a real bug the doc comment
+    // above `ensure_running` describes — five concurrent invocations
+    // against a cold socket left two daemons alive at once — and had no
+    // regression test at all.
+
+    #[test]
+    fn a_freshly_created_lock_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manager.spawn.lock");
+        std::fs::write(&path, "12345").unwrap();
+        assert!(
+            !spawn_lock_is_stale(&path),
+            "a lock written just now belongs to a live spawner"
+        );
+    }
+
+    #[test]
+    fn a_lock_older_than_the_threshold_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manager.spawn.lock");
+        std::fs::write(&path, "12345").unwrap();
+        // Backdate well past SPAWN_LOCK_STALE_AFTER.
+        let old = std::time::SystemTime::now() - SPAWN_LOCK_STALE_AFTER - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(
+            spawn_lock_is_stale(&path),
+            "a lock this old belongs to a spawner that died before cleaning up"
+        );
+    }
+
+    #[test]
+    fn a_missing_lock_is_treated_as_stale_rather_than_blocking() {
+        // Can't stat it, so it isn't holding anything back. Treating this
+        // as "still locked" would deadlock every future spawn attempt.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(spawn_lock_is_stale(&dir.path().join("does-not-exist.lock")));
+    }
+}

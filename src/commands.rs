@@ -753,7 +753,9 @@ pub async fn run_reference(
         .await?;
 
     let all_locations: Vec<Location> = serde_json::from_value(result).unwrap_or_default();
-    let end = (start_index + max_items).min(all_locations.len());
+    let end = start_index
+        .saturating_add(max_items)
+        .min(all_locations.len());
     let page = if start_index < all_locations.len() {
         &all_locations[start_index..end]
     } else {
@@ -765,7 +767,7 @@ pub async fn run_reference(
     if remaining > 0 {
         eprintln!(
             "\n[{remaining} more results — use --start-index {} to continue]",
-            start_index + max_items
+            start_index.saturating_add(max_items)
         );
     }
     Ok(())
@@ -1032,7 +1034,7 @@ pub async fn run_search(
     }
 
     let total = results.len();
-    let end = (start_index + max_items).min(total);
+    let end = start_index.saturating_add(max_items).min(total);
     let page = if start_index < total {
         &results[start_index..end]
     } else {
@@ -1045,11 +1047,9 @@ pub async fn run_search(
                 println!("No matches found.");
             } else {
                 for (i, sym) in page.iter().enumerate() {
-                    let file_path = sym
-                        .location
-                        .uri
-                        .strip_prefix("file://")
-                        .unwrap_or(&sym.location.uri);
+                    // Decoded, like every other path this tool prints —
+                    // stripping the scheme by hand left `%20` in the output.
+                    let file_path = lsp::uri::to_path_string(&sym.location.uri);
                     println!(
                         "{}. [{}] {}  {}:{}",
                         i + start_index + 1,
@@ -1064,7 +1064,7 @@ pub async fn run_search(
             if remaining > 0 {
                 println!(
                     "\n[{remaining} more — use --start-index {} ]",
-                    start_index + max_items
+                    start_index.saturating_add(max_items)
                 );
             }
         }
@@ -1075,7 +1075,7 @@ pub async fn run_search(
                     json!({
                         "name": sym.name,
                         "kind": symbol_kind_name(sym.kind),
-                        "uri": sym.location.uri.strip_prefix("file://").unwrap_or(&sym.location.uri),
+                        "uri": lsp::uri::to_path_string(&sym.location.uri),
                         "line": sym.location.range.start.line + 1,
                         "containerName": sym.container_name,
                     })

@@ -9,8 +9,14 @@ pub enum OutputFormat {
     Markdown,
 }
 
+/// Server-supplied URI to a displayable path.
+///
+/// Delegates to the shared decoder rather than stripping the scheme by
+/// hand: rust-analyzer and typescript-language-server both percent-encode
+/// what they return, so a project under `~/my project/` used to be printed
+/// as `/my%20project/...` — a path the user cannot paste anywhere.
 fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+    lsp::uri::to_path_string(uri)
 }
 
 fn symbol_to_json(sym: &DocumentSymbol) -> serde_json::Value {
@@ -407,5 +413,84 @@ mod tests {
         let out = OutputFormat::Markdown.reference(&[loc.clone(), loc]);
         assert!(out.starts_with("1. /a.rs:1"));
         assert!(out.contains("2. /a.rs:1"));
+    }
+
+    // --- rename ------------------------------------------------------
+    // `fn rename` is what tells the user whether a rename was applied and
+    // whether part of it was silently skipped, and it had no test at all.
+
+    fn text_edit(line: u32, new_text: &str) -> TextEdit {
+        TextEdit {
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position { line, character: 3 },
+            },
+            new_text: new_text.to_string(),
+        }
+    }
+
+    #[test]
+    fn json_rename_preview_reports_counts_and_that_nothing_was_written() {
+        let files = vec![(
+            "file:///a.rs".to_string(),
+            vec![text_edit(0, "x"), text_edit(2, "x")],
+        )];
+        let out = OutputFormat::Json.rename("x", false, &files, 0);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["kind"], "rename");
+        assert_eq!(v["newName"], "x");
+        assert_eq!(v["applied"], false);
+        assert_eq!(v["editCount"], 2);
+        assert_eq!(v["skippedOperations"], 0);
+        assert_eq!(v["files"][0]["editCount"], 2);
+    }
+
+    #[test]
+    fn json_rename_surfaces_skipped_file_operations() {
+        // A rename that also needs to create/rename/delete a file is only
+        // partly applied by this tool. Reporting the count is what stops
+        // that looking complete when it isn't.
+        let files = vec![("file:///a.rs".to_string(), vec![text_edit(0, "x")])];
+        let out = OutputFormat::Json.rename("x", true, &files, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["applied"], true);
+        assert_eq!(v["skippedOperations"], 2);
+    }
+
+    #[test]
+    fn markdown_rename_preview_says_it_wrote_nothing() {
+        let files = vec![("file:///a.rs".to_string(), vec![text_edit(0, "x")])];
+        let out = OutputFormat::Markdown.rename("x", false, &files, 0);
+        assert!(out.contains("Preview only"));
+        assert!(out.contains("--apply"));
+        assert!(!out.contains("Applied"));
+    }
+
+    #[test]
+    fn markdown_rename_applied_says_so() {
+        let files = vec![("file:///a.rs".to_string(), vec![text_edit(0, "x")])];
+        let out = OutputFormat::Markdown.rename("x", true, &files, 0);
+        assert!(out.contains("Applied 1 edit(s)"));
+    }
+
+    #[test]
+    fn markdown_rename_warns_that_skipped_operations_leave_it_incomplete() {
+        let files = vec![("file:///a.rs".to_string(), vec![text_edit(0, "x")])];
+        let out = OutputFormat::Markdown.rename("x", true, &files, 1);
+        assert!(out.contains("NOT applied"));
+        assert!(out.contains("incomplete"));
+    }
+
+    #[test]
+    fn rename_paths_are_percent_decoded_for_display() {
+        let files = vec![(
+            "file:///my%20project/a.rs".to_string(),
+            vec![text_edit(0, "x")],
+        )];
+        let out = OutputFormat::Markdown.rename("x", false, &files, 0);
+        assert!(
+            out.contains("/my project/a.rs"),
+            "expected a decoded path, got: {out}"
+        );
     }
 }

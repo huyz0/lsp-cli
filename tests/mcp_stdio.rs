@@ -8,11 +8,32 @@ fn send(stdin: &mut impl Write, req: serde_json::Value) {
     stdin.flush().unwrap();
 }
 
-fn recv(reader: &mut impl BufRead) -> serde_json::Value {
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
+/// Reads one JSON-RPC line, giving up rather than blocking forever.
+///
+/// This was a bare `read_line`, which meant a server that deadlocked or
+/// exited mid-protocol hung the test until the CI job timed out instead of
+/// failing — and these are among the few tests CI actually runs. The read
+/// happens on a worker thread so the timeout can win the race.
+fn recv(reader: &mut (impl BufRead + Send)) -> serde_json::Value {
+    let line = read_line_with_timeout(reader, std::time::Duration::from_secs(20));
     serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("invalid JSON-RPC line: {e}\nline: {line}"))
+}
+
+fn read_line_with_timeout(
+    reader: &mut (impl BufRead + Send),
+    timeout: std::time::Duration,
+) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        rx.recv_timeout(timeout)
+            .expect("timed out waiting for a JSON-RPC response from `lsp mcp`")
+    })
 }
 
 #[test]

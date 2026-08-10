@@ -784,3 +784,49 @@ async fn serve_uds(listener: tokio::net::UnixListener, router: Router) -> Result
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `is_stale` carries a doc comment saying it was "extracted out of
+    // reap_idle for direct unit testing" — and then this file had no test
+    // module at all. These are those tests.
+
+    #[test]
+    fn a_server_idle_longer_than_the_cutoff_is_stale() {
+        let now = 1_000_000;
+        assert!(is_stale(now - 5_000, now, 1_000));
+    }
+
+    #[test]
+    fn a_server_idle_less_than_the_cutoff_is_not_stale() {
+        let now = 1_000_000;
+        assert!(!is_stale(now - 500, now, 1_000));
+    }
+
+    #[test]
+    fn the_cutoff_boundary_is_exclusive() {
+        // Exactly at the cutoff is not yet stale, so a server used exactly
+        // idleTimeout ago survives one more scan rather than being reaped
+        // on the tick it becomes eligible.
+        let now = 1_000_000;
+        assert!(!is_stale(now - 1_000, now, 1_000));
+        assert!(is_stale(now - 1_001, now, 1_000));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_report_stale() {
+        // now_ms comes from SystemTime, which can move backwards across an
+        // NTP correction. A negative age must not be treated as "very old".
+        let now = 1_000_000;
+        assert!(!is_stale(now + 10_000, now, 1_000));
+    }
+
+    #[test]
+    fn a_zero_cutoff_reaps_anything_with_any_measurable_idle_time() {
+        let now = 1_000_000;
+        assert!(is_stale(now - 1, now, 0));
+        assert!(!is_stale(now, now, 0));
+    }
+}
