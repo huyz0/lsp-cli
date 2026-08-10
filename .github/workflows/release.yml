@@ -73,13 +73,16 @@ jobs:
         run: |
           dir=target/${{ matrix.target }}/release
           out=lsp-${{ matrix.target }}.tar.gz
-          # lsp-json-lsp is a bundled Rust-native server (see
-          # docs/architecture.md#bundled-rust-native-servers), not an
-          # optional extra — it has to ship in the same archive as `lsp`
-          # itself or `lsp install json`/`lsp outline foo.json` breaks for
-          # everyone who installs from a release instead of building from
-          # source.
-          tar -czf "$out" -C "$dir" lsp lsp-json-lsp
+          # Bundled Rust-native servers (docs/architecture.md#bundled-
+          # rust-native-servers) follow the lsp-<lang>-lsp naming
+          # convention and are not optional extras — each one has to ship
+          # in the same archive as `lsp` itself, or `lsp install json`/
+          # `lsp outline foo.json` (etc.) breaks for anyone installing
+          # from a release instead of building from source. Globbed so
+          # adding another bundled server doesn't need another edit here.
+          cd "$dir"
+          tar -czf "$OLDPWD/$out" lsp lsp-*-lsp
+          cd "$OLDPWD"
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
@@ -189,11 +192,14 @@ jobs:
             end
 
             def install
-              # lsp-json-lsp is a bundled Rust-native server that must sit
-              # next to `lsp` itself (registry.rs resolves it relative to
-              # the running executable's own directory) — installing both
-              # into the same bin/ keeps that true under Homebrew too.
-              bin.install "lsp", "lsp-json-lsp"
+              # Bundled Rust-native servers (lsp-json-lsp, lsp-css-lsp,
+              # ...) must sit next to `lsp` itself — registry.rs resolves
+              # each one relative to the running executable's own
+              # directory. Globbed so adding another bundled server
+              # doesn't need another edit here; installing them all into
+              # the same bin/ keeps that true under Homebrew too.
+              bin.install "lsp"
+              bin.install Dir["lsp-*-lsp"]
             end
 
             def caveats

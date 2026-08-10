@@ -84,20 +84,24 @@ pub fn has_html_server() -> bool {
     has_server("vscode-html-language-server")
 }
 
-pub fn has_css_server() -> bool {
-    has_server("vscode-css-language-server")
-}
-
-/// json's server is bundled and built as a sibling binary of `lsp` itself
-/// (see Cargo.toml's `[[bin]]` entries and src/servers/json_lsp.rs) rather
-/// than an optional external dependency — `cargo test`/`cargo build`
-/// building the package builds it too, so this is really just checking
+/// json's and css's servers are bundled and built as sibling binaries of
+/// `lsp` itself (see Cargo.toml's `[[bin]]` entries and src/servers/)
+/// rather than optional external dependencies — `cargo test`/`cargo build`
+/// building the package builds them too, so this is really just checking
 /// "did the build actually produce it," not "is it installed."
-pub fn has_json_server() -> bool {
+fn has_bundled_server(bin_name: &str) -> bool {
     bin_path()
         .parent()
-        .map(|d| d.join("lsp-json-lsp").exists())
+        .map(|d| d.join(bin_name).exists())
         .unwrap_or(false)
+}
+
+pub fn has_css_server() -> bool {
+    has_bundled_server("lsp-css-lsp")
+}
+
+pub fn has_json_server() -> bool {
+    has_bundled_server("lsp-json-lsp")
 }
 
 pub fn has_jdtls() -> bool {

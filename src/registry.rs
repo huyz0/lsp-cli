@@ -154,8 +154,12 @@ pub fn languages() -> &'static [LanguageConfig] {
             name: "css",
             extensions: &[".css", ".scss", ".less"],
             root_markers: &[],
-            server_bin: "vscode-css-language-server",
-            server_args: |_| vec!["--stdio".to_string()],
+            // Rust-native, bundled as a sibling binary of `lsp` itself
+            // (see Cargo.toml's `[[bin]]` entries and src/servers/css_lsp.rs)
+            // rather than downloaded/npm-installed — no `--stdio` flag, it
+            // only ever speaks stdio.
+            server_bin: "lsp-css-lsp",
+            server_args: |_| vec![],
         },
         LanguageConfig {
             name: "json",
@@ -171,6 +175,15 @@ pub fn languages() -> &'static [LanguageConfig] {
     ]
 }
 
+/// Bundled Rust-native servers under `src/servers/` all follow the
+/// `lsp-<lang>-lsp` binary-name convention — used both here (to resolve
+/// them relative to the running executable instead of the download-managed
+/// install dir) and in install.rs (to treat "installing" one as just
+/// confirming the sibling binary is present).
+pub fn is_bundled_server(installed_bin_name: &str) -> bool {
+    installed_bin_name.starts_with("lsp-") && installed_bin_name.ends_with("-lsp")
+}
+
 pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
     // deno relies on PATH; bundled Rust-native servers (src/servers/) ship
     // as sibling binaries right next to `lsp` itself and are resolved
@@ -179,7 +192,7 @@ pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
     // install_dir.
     if installed_bin_name == "deno" {
         PathBuf::from("deno")
-    } else if installed_bin_name == "lsp-json-lsp" {
+    } else if is_bundled_server(installed_bin_name) {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join(installed_bin_name)))

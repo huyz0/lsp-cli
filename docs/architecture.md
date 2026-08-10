@@ -117,9 +117,9 @@ constant.
 
 ## Automatic language server installation (`src/install.rs`)
 
-Every language except `deno` is auto-installable, including Java. `json` is
-bundled (see "Bundled Rust-native servers" below, no download at all);
-`typescript`/`python`/`html`/`css`/`bash` run `npm
+Every language except `deno` is auto-installable, including Java. `json`
+and `css` are bundled (see "Bundled Rust-native servers" below, no
+download at all); `typescript`/`python`/`html`/`bash` run `npm
 install <package>` into `~/.lsp-cli/packages/` and write a `#!/bin/sh`
 wrapper into `~/.lsp-cli/servers/` that execs `node <entry> "$@"`; `go`
 runs `go install golang.org/x/tools/gopls@latest` into an isolated
@@ -161,39 +161,58 @@ release process today).
 ## Bundled Rust-native servers (`src/servers/`)
 
 Most managed languages proxy to a third-party server this tool downloads or
-npm-installs. JSON is the first exception: `lsp-json-lsp`
-(`src/servers/json_lsp.rs`) is a real LSP server written for this project,
-compiled as a sibling binary of `lsp` itself via a second `[[bin]]` entry in
-`Cargo.toml`. `cargo build --release` produces both `target/release/lsp` and
-`target/release/lsp-json-lsp` in one shot, and every release archive ships
-both, so "installing" the JSON server is just confirming that sibling
-binary is present next to `lsp`, no network, no npm, no Node.js runtime.
-`registry::server_path` resolves it relative to `std::env::current_exe()`'s
-own directory, the same special-case treatment `deno` gets for resolving
-via `PATH` instead of the download-managed `install_dir`.
+npm-installs. JSON and CSS are the exceptions so far: `lsp-json-lsp`
+(`src/servers/json_lsp.rs`) and `lsp-css-lsp` (`src/servers/css_lsp.rs`)
+are real LSP servers written for this project, each compiled as a sibling
+binary of `lsp` itself via its own `[[bin]]` entry in `Cargo.toml`. `cargo
+build --release` produces `target/release/lsp`,
+`target/release/lsp-json-lsp`, and `target/release/lsp-css-lsp` in one
+shot, and every release archive ships all of them (packaging globs
+`lsp-*-lsp` rather than naming each one, so adding another bundled server
+doesn't need another edit to release.yml/install.sh/the Homebrew formula
+generator), so "installing" one of these servers is just confirming that
+sibling binary is present next to `lsp`, no network, no npm, no Node.js
+runtime. `registry::is_bundled_server` recognizes any `lsp-<lang>-lsp`
+binary name, and `registry::server_path` resolves it relative to
+`std::env::current_exe()`'s own directory, the same special-case treatment
+`deno` gets for resolving via `PATH` instead of the download-managed
+`install_dir`.
 
 Built on two crates rust-analyzer itself uses for the server side of the
 protocol: `lsp-server` (JSON-RPC-over-stdio framing and the request/
-notification dispatch loop — `src/lsp_client.rs` elsewhere in this codebase
+notification dispatch loop; `src/lsp_client.rs` elsewhere in this codebase
 only ever implements the *client* side) and `lsp-types` (the protocol's
-type definitions). Parsing is `tree-sitter-json`, the same incremental,
-editor-oriented grammar approach intended for every server under
-`src/servers/`, not just this one.
+type definitions). Parsing is `tree-sitter-<lang>` per server (`-json`,
+`-css`), the same incremental, editor-oriented grammar approach intended
+for every server under `src/servers/`.
 
-Scope is deliberately narrow: `textDocument/documentSymbol` (a real
-hierarchical outline — nested objects/arrays become children, not the flat
-list the HTML server above returns, since this tool controls both ends of
-the protocol here) and a minimal `textDocument/hover`. No diagnostics, no
-completion, no schema validation.
+Scope is deliberately narrow per server: `textDocument/documentSymbol` (a
+real hierarchical outline: JSON's nested objects/arrays and CSS's
+`@media`/`@supports` bodies become children, not the flat list the HTML
+server above returns, since this tool controls both ends of the protocol
+here) and a minimal `textDocument/hover`. No diagnostics, no completion, no
+schema/property-value validation.
 
-One correctness detail that matters more here than anywhere else in this
-codebase: `locate.rs`, on the *client* side, approximates LSP character
-positions as Unicode scalar (`char`) offsets rather than strict UTF-16 code
-units — a documented, acceptable shortcut for talking to *other* people's
-spec-compliant servers. A server can't take that shortcut; a real editor
-expects exact UTF-16 semantics. `json_lsp.rs`'s `point_to_position`/
-`position_to_byte` do the real conversion (counting `char::len_utf16()` per
-character) rather than reusing the client's approximation.
+Two things worth knowing before adding another one of these:
+
+- **UTF-16 position correctness matters more here than anywhere else in
+  this codebase.** `locate.rs`, on the *client* side, approximates LSP
+  character positions as Unicode scalar (`char`) offsets rather than
+  strict UTF-16 code units, a documented, acceptable shortcut for talking
+  to *other* people's spec-compliant servers. A server can't take that
+  shortcut; a real editor expects exact UTF-16 semantics. Both servers'
+  `point_to_position`/`position_to_byte` do the real conversion (counting
+  `char::len_utf16()` per character) rather than reusing the client's
+  approximation.
+- **Don't guess a tree-sitter grammar's node kinds from memory or
+  documentation.** `css_lsp.rs`'s at-rule handling shipped with a real bug
+  during development: it assumed every at-rule's body sits under a child
+  node named `block`, which is true for `@media`/`@supports` but not
+  `@keyframes` (its body is `keyframe_block_list`), caught by dumping a
+  real parse tree's s-expression (`tree.root_node().to_sexp()`) against
+  representative source and reading the actual node kinds, not by
+  inference. Do that dump first for any new grammar, before writing
+  extraction code against assumed node names.
 
 ## Commands beyond core navigation
 
@@ -220,7 +239,7 @@ character) rather than reusing the client's approximation.
 - **`lsp rename <file> --scope <symbol> --new-name <name> [--apply]`**:
   LSP rename (`textDocument/rename`), the only write operation in this
   tool. Without `--apply`, only previews the edits `WorkspaceEdit` would
-  make — nothing touches disk. This default-to-preview design is
+  make. Nothing touches disk. This default-to-preview design is
   deliberate: unlike the read-only commands, an incomplete rename applies
   real edits and can leave a codebase silently half-renamed (a missed
   reference under-indexed at request time, or a usage a

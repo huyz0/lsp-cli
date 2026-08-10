@@ -90,7 +90,7 @@ yourself. `lsp server list` shows what's running.
 | Rust | ✅ (GitHub release) | Full support. |
 | Java | ✅ (Eclipse jdtls release) | Requires a JDK already present (via [sdkman](https://sdkman.io), `$JAVA_HOME`, or `java` on `PATH`); this tool won't install a JDK for you. |
 | Kotlin | ✅ (GitHub release) | Full support. |
-| CSS | ✅ (npm) | Full support. |
+| CSS | ✅ bundled, no install step | Outline (selectors, `@media`/`@keyframes`/`@supports` as nested containers) and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |
 | JSON | ✅ bundled, no install step | Outline and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |
 | HTML | ✅ | Outline is limited: the server returns a flat symbol list this tool doesn't parse into an outline tree yet. |
 | C / C++ | ✅ (`clangd`, GitHub release) | Full support. |

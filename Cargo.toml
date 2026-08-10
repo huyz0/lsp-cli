@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "lsp-json-lsp"
 path = "src/servers/json_lsp.rs"
 
+[[bin]]
+name = "lsp-css-lsp"
+path = "src/servers/css_lsp.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +41,7 @@ lsp-server = "0.10"
 lsp-types = "0.97"
 tree-sitter = "0.24"
 tree-sitter-json = "0.24"
+tree-sitter-css = "0.23"
 
 [dev-dependencies]
 tempfile = "3"

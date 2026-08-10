@@ -1,5 +1,5 @@
 //! Automatic language server installation. npm-installed servers
-//! (typescript, python, html/css, bash) get a thin shell wrapper into
+//! (typescript, python, html, bash) get a thin shell wrapper into
 //! `~/.lsp-cli/servers/<bin>` that execs `node <entry> "$@"`; gopls is
 //! `go install`ed into an isolated GOPATH and symlinked in; rust-analyzer,
 //! kotlin-language-server, clangd, lua-language-server, and zls are fetched
@@ -8,11 +8,11 @@
 //! sdkman/`JAVA_HOME`/`PATH` (installing a JDK itself is out of scope —
 //! it's a much bigger, more opinionated dependency than any other managed
 //! server); csharp-ls and ruby-lsp go through `dotnet tool install`/`gem
-//! install` respectively. json is the first Rust-native, bundled server
-//! (see src/servers/json_lsp.rs) — it ships as a sibling binary of `lsp`
-//! itself, so "installing" it is just confirming that binary is present,
-//! no download/npm/network involved at all. deno remains unmanaged since
-//! it relies on the `deno` binary already being on `PATH`.
+//! install` respectively. json and css are Rust-native, bundled servers
+//! (see src/servers/) shipped as sibling binaries of `lsp` itself, so
+//! "installing" one is just confirming that binary is present, no
+//! download/npm/network involved at all. deno remains unmanaged since it
+//! relies on the `deno` binary already being on `PATH`.
 
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
@@ -142,13 +142,6 @@ fn npm_spec(language: &str) -> Option<NpmSpec> {
             packages: &["vscode-langservers-extracted"],
             entry_rel: "node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
             wrapper_name: "vscode-html-language-server",
-            version_args: &["--version"],
-            version_entry_rel: None,
-        },
-        "css" => NpmSpec {
-            packages: &["vscode-langservers-extracted"],
-            entry_rel: "node_modules/vscode-langservers-extracted/bin/vscode-css-language-server",
-            wrapper_name: "vscode-css-language-server",
             version_args: &["--version"],
             version_entry_rel: None,
         },
@@ -977,33 +970,31 @@ fn check_ruby_lsp_version() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// json — a Rust-native server built and shipped as a sibling binary of
-// `lsp` itself (see Cargo.toml's `[[bin]]` entries and src/servers/
-// json_lsp.rs), not downloaded or npm-installed. "Installing" it is just
+// Bundled Rust-native servers (json, css, ... — see src/servers/) built and
+// shipped as sibling binaries of `lsp` itself (Cargo.toml's `[[bin]]`
+// entries), not downloaded or npm-installed. "Installing" one is just
 // confirming the bundled binary is actually present next to `lsp` —
 // `registry::server_path` resolves it relative to the running executable's
-// own directory, not `default_install_dir()`.
+// own directory, not `default_install_dir()`. One shared implementation
+// parameterized on the binary name, since every bundled server follows the
+// exact same `lsp-<lang>-lsp` convention and has nothing else to configure.
 // ---------------------------------------------------------------------------
 
-fn json_lsp_bin() -> PathBuf {
-    crate::registry::server_path("lsp-json-lsp", &default_install_dir())
-}
-
-fn check_json_version() -> Option<String> {
-    let bin = json_lsp_bin();
+fn check_bundled_server_version(bin_name: &str) -> Option<String> {
+    let bin = crate::registry::server_path(bin_name, &default_install_dir());
     if !bin.exists() {
         return None;
     }
     run_binary_version(&bin, &["--version"])
 }
 
-fn install_json() -> Result<PathBuf> {
-    let bin = json_lsp_bin();
+fn install_bundled_server(bin_name: &str) -> Result<PathBuf> {
+    let bin = crate::registry::server_path(bin_name, &default_install_dir());
     if bin.exists() {
         return Ok(bin);
     }
     bail!(
-        "lsp-json-lsp (bundled with this tool) not found at {}. This usually means `lsp` was installed without its bundled servers — reinstall via the same method you used for `lsp` itself (Homebrew/install.sh/a prebuilt release archive), or from source with `cargo build --release --bin lsp-json-lsp`.",
+        "{bin_name} (bundled with this tool) not found at {}. This usually means `lsp` was installed without its bundled servers — reinstall via the same method you used for `lsp` itself (Homebrew/install.sh/a prebuilt release archive), or from source with `cargo build --release --bin {bin_name}`.",
         bin.display()
     );
 }
@@ -1026,7 +1017,8 @@ async fn install_language(language: &str) -> Result<PathBuf> {
         "zig" => install_zls().await,
         "csharp" => install_csharp_ls(),
         "ruby" => install_ruby_lsp(),
-        "json" => install_json(),
+        "json" => install_bundled_server("lsp-json-lsp"),
+        "css" => install_bundled_server("lsp-css-lsp"),
         other => bail!(
             "Unknown language: {other}\nSupported: {}",
             MANAGED_LANGUAGES.join(", ")
@@ -1048,7 +1040,8 @@ fn check_version(language: &str) -> Option<String> {
         "zig" => check_zls_version(),
         "csharp" => check_csharp_ls_version(),
         "ruby" => check_ruby_lsp_version(),
-        "json" => check_json_version(),
+        "json" => check_bundled_server_version("lsp-json-lsp"),
+        "css" => check_bundled_server_version("lsp-css-lsp"),
         _ => None,
     }
 }
@@ -1251,6 +1244,7 @@ mod tests {
                     | "csharp"
                     | "ruby"
                     | "json"
+                    | "css"
             );
             assert!(
                 has_npm_spec || has_explicit_arm,
