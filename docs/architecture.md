@@ -94,7 +94,7 @@ an already-open file is turned into a `didChange` instead
 reject a duplicate `didOpen` outright and skip reprocessing the file,
 which would otherwise silently serve a stale view of it. Proxy calls also
 always pass the resolved language explicitly, not just the project root:
-languages with no root markers (html/css/json/markdown) fall back
+languages with no root markers (html/css/json/csharp/bash) fall back
 to the file's own directory as `project_root`, so two different-language
 servers can share that key and must be disambiguated by language too.
 
@@ -117,8 +117,9 @@ constant.
 
 ## Automatic language server installation (`src/install.rs`)
 
-Every language except `deno` is auto-installable, including Java.
-`typescript`/`python`/`html`/`css`/`json`/`markdown` run `npm
+Every language except `deno` is auto-installable, including Java. `json` is
+bundled (see "Bundled Rust-native servers" below, no download at all);
+`typescript`/`python`/`html`/`css`/`bash` run `npm
 install <package>` into `~/.lsp-cli/packages/` and write a `#!/bin/sh`
 wrapper into `~/.lsp-cli/servers/` that execs `node <entry> "$@"`; `go`
 runs `go install golang.org/x/tools/gopls@latest` into an isolated
@@ -156,6 +157,43 @@ rather than fixed, since a real fix needs per-upstream-project curated
 trusted checksums/keys (none of rust-analyzer, kotlin-language-server, or
 Eclipse's jdtls snapshots publish a checksum manifest as part of their
 release process today).
+
+## Bundled Rust-native servers (`src/servers/`)
+
+Most managed languages proxy to a third-party server this tool downloads or
+npm-installs. JSON is the first exception: `lsp-json-lsp`
+(`src/servers/json_lsp.rs`) is a real LSP server written for this project,
+compiled as a sibling binary of `lsp` itself via a second `[[bin]]` entry in
+`Cargo.toml`. `cargo build --release` produces both `target/release/lsp` and
+`target/release/lsp-json-lsp` in one shot, and every release archive ships
+both, so "installing" the JSON server is just confirming that sibling
+binary is present next to `lsp`, no network, no npm, no Node.js runtime.
+`registry::server_path` resolves it relative to `std::env::current_exe()`'s
+own directory, the same special-case treatment `deno` gets for resolving
+via `PATH` instead of the download-managed `install_dir`.
+
+Built on two crates rust-analyzer itself uses for the server side of the
+protocol: `lsp-server` (JSON-RPC-over-stdio framing and the request/
+notification dispatch loop — `src/lsp_client.rs` elsewhere in this codebase
+only ever implements the *client* side) and `lsp-types` (the protocol's
+type definitions). Parsing is `tree-sitter-json`, the same incremental,
+editor-oriented grammar approach intended for every server under
+`src/servers/`, not just this one.
+
+Scope is deliberately narrow: `textDocument/documentSymbol` (a real
+hierarchical outline — nested objects/arrays become children, not the flat
+list the HTML server above returns, since this tool controls both ends of
+the protocol here) and a minimal `textDocument/hover`. No diagnostics, no
+completion, no schema validation.
+
+One correctness detail that matters more here than anywhere else in this
+codebase: `locate.rs`, on the *client* side, approximates LSP character
+positions as Unicode scalar (`char`) offsets rather than strict UTF-16 code
+units — a documented, acceptable shortcut for talking to *other* people's
+spec-compliant servers. A server can't take that shortcut; a real editor
+expects exact UTF-16 semantics. `json_lsp.rs`'s `point_to_position`/
+`position_to_byte` do the real conversion (counting `char::len_utf16()` per
+character) rather than reusing the client's approximation.
 
 ## Commands beyond core navigation
 

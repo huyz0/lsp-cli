@@ -161,16 +161,29 @@ pub fn languages() -> &'static [LanguageConfig] {
             name: "json",
             extensions: &[".json", ".jsonc"],
             root_markers: &[],
-            server_bin: "vscode-json-language-server",
-            server_args: |_| vec!["--stdio".to_string()],
+            // Rust-native, bundled as a sibling binary of `lsp` itself
+            // (see Cargo.toml's `[[bin]]` entries and src/servers/json_lsp.rs)
+            // rather than downloaded/npm-installed — no `--stdio` flag,
+            // it only ever speaks stdio.
+            server_bin: "lsp-json-lsp",
+            server_args: |_| vec![],
         },
     ]
 }
 
 pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
-    // deno relies on PATH; everything else is installed under install_dir
+    // deno relies on PATH; bundled Rust-native servers (src/servers/) ship
+    // as sibling binaries right next to `lsp` itself and are resolved
+    // relative to the running executable rather than the
+    // download/npm-managed install_dir — everything else lives under
+    // install_dir.
     if installed_bin_name == "deno" {
         PathBuf::from("deno")
+    } else if installed_bin_name == "lsp-json-lsp" {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(installed_bin_name)))
+            .unwrap_or_else(|| PathBuf::from(installed_bin_name))
     } else {
         install_dir.join(installed_bin_name)
     }

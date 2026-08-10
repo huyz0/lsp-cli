@@ -88,8 +88,16 @@ pub fn has_css_server() -> bool {
     has_server("vscode-css-language-server")
 }
 
+/// json's server is bundled and built as a sibling binary of `lsp` itself
+/// (see Cargo.toml's `[[bin]]` entries and src/servers/json_lsp.rs) rather
+/// than an optional external dependency — `cargo test`/`cargo build`
+/// building the package builds it too, so this is really just checking
+/// "did the build actually produce it," not "is it installed."
 pub fn has_json_server() -> bool {
-    has_server("vscode-json-language-server")
+    bin_path()
+        .parent()
+        .map(|d| d.join("lsp-json-lsp").exists())
+        .unwrap_or(false)
 }
 
 pub fn has_jdtls() -> bool {

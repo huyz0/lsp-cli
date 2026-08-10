@@ -7,6 +7,10 @@ edition = "2021"
 name = "lsp"
 path = "src/main.rs"
 
+[[bin]]
+name = "lsp-json-lsp"
+path = "src/servers/json_lsp.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,6 +29,14 @@ hyper = { version = "1.10.1", features = ["server", "http1"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 thiserror = "1"
 notify = "6"
+
+# For the bundled Rust-native language servers (src/servers/) — same crates
+# rust-analyzer itself uses for the server side of the protocol (lsp_client.rs
+# only ever implements the client side).
+lsp-server = "0.10"
+lsp-types = "0.97"
+tree-sitter = "0.24"
+tree-sitter-json = "0.24"
 
 [dev-dependencies]
 tempfile = "3"

@@ -71,9 +71,15 @@ jobs:
       - name: Package (unix)
         if: matrix.archive_ext == 'tar.gz'
         run: |
-          bin=target/${{ matrix.target }}/release/lsp
+          dir=target/${{ matrix.target }}/release
           out=lsp-${{ matrix.target }}.tar.gz
-          tar -czf "$out" -C "$(dirname "$bin")" "$(basename "$bin")"
+          # lsp-json-lsp is a bundled Rust-native server (see
+          # docs/architecture.md#bundled-rust-native-servers), not an
+          # optional extra — it has to ship in the same archive as `lsp`
+          # itself or `lsp install json`/`lsp outline foo.json` breaks for
+          # everyone who installs from a release instead of building from
+          # source.
+          tar -czf "$out" -C "$dir" lsp lsp-json-lsp
           echo "ASSET=$out" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
@@ -183,7 +189,11 @@ jobs:
             end
 
             def install
-              bin.install "lsp"
+              # lsp-json-lsp is a bundled Rust-native server that must sit
+              # next to `lsp` itself (registry.rs resolves it relative to
+              # the running executable's own directory) — installing both
+              # into the same bin/ keeps that true under Homebrew too.
+              bin.install "lsp", "lsp-json-lsp"
             end
 
             def caveats

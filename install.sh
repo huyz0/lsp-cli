@@ -50,6 +50,14 @@ tar -xzf "$tmp/lsp.tar.gz" -C "$tmp"
 mkdir -p "$INSTALL_DIR"
 mv "$tmp/lsp" "$INSTALL_DIR/lsp"
 chmod +x "$INSTALL_DIR/lsp"
+# lsp-json-lsp is a bundled Rust-native server (docs/architecture.md
+# #bundled-rust-native-servers) that must live next to `lsp` itself —
+# registry.rs resolves it relative to the running executable's own
+# directory, not $PATH, so it has to land in the same $INSTALL_DIR.
+if [ -f "$tmp/lsp-json-lsp" ]; then
+  mv "$tmp/lsp-json-lsp" "$INSTALL_DIR/lsp-json-lsp"
+  chmod +x "$INSTALL_DIR/lsp-json-lsp"
+fi
 
 echo "Installed to $INSTALL_DIR/lsp"
 case ":$PATH:" in
