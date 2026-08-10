@@ -28,6 +28,24 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
   `workspace/symbol` (in practice, whenever no language server binary is
   installed), so it's the primary functional path for anyone without local
   LSP servers.
+
+  Two things make it usable at scale. The index is **cached in the daemon**
+  per project root rather than rebuilt in the CLI process on every search
+  and thrown away at exit; it is revalidated with a stat-only
+  `TreeFingerprint` (file count, total size, newest mtime over the same
+  filtered walk), which is far cheaper than a rebuild and does not depend
+  on file-watcher events reaching us — the watcher only covers one
+  language's extensions for roots with a live server, so it cannot see the
+  whole set of files this index spans. And scoring goes through an
+  **inverted index** rather than walking every document per query token:
+  `search` discards zero-scoring documents anyway, and a document scores
+  above zero only if a query token matches one of its tokens exactly or as
+  a prefix, so the postings list yields exactly the same results. On a
+  600k-symbol corpus a warm search went from ~1.2s to ~0.1s. A brute-force
+  reference implementation is kept in the tests to pin the equivalence.
+
+  `lsp search` therefore starts the daemon if one isn't running. If it
+  cannot, the index is built in-process as before, just without caching.
 - **LSP JSON-RPC client** (`src/lsp_client.rs`): hand-rolled Content-Length
   framing, `initialize`, `textDocument/documentSymbol`,
   `textDocument/definition`/`declaration`/`typeDefinition`,

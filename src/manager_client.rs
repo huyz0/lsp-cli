@@ -181,6 +181,26 @@ impl ManagerClient {
         Ok(serde_json::from_str(&resp)?)
     }
 
+    /// BM25 fallback search against the daemon's cached index for
+    /// `project_root`.
+    ///
+    /// Worth the round trip because the daemon keeps the index between
+    /// invocations: building one reads every source file in the project,
+    /// which the CLI process used to redo from scratch on every search and
+    /// then throw away at exit.
+    pub async fn search(
+        &self,
+        project_root: &str,
+        query: &str,
+    ) -> Result<Vec<crate::protocol::SymbolInformation>> {
+        let body = serde_json::json!({ "project_root": project_root, "query": query }).to_string();
+        let (status, resp) = raw_request("POST", "/search", Some(body)).await?;
+        if status != 200 {
+            bail!("{resp}");
+        }
+        Ok(serde_json::from_str(&resp)?)
+    }
+
     pub async fn delete_servers(
         &self,
         path: Option<&str>,

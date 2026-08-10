@@ -71,6 +71,12 @@ pub struct DeleteRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SearchRequest {
+    pub project_root: String,
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ProxyRequest {
     pub project_root: String,
     #[serde(default)]
@@ -112,6 +118,26 @@ pub struct Manager {
     /// commands always read the current file fresh off disk and never see
     /// unwatched external edits in the first place.
     watcher: WatcherManager,
+    /// BM25 fallback indexes, keyed by project root.
+    ///
+    /// Building one walks and reads every source file in the project and
+    /// runs the per-language regex heuristics over each line, which is by
+    /// far the most expensive thing this tool does. It used to happen in
+    /// the CLI process on every single `lsp search` that fell back, and be
+    /// dropped on exit — so two identical searches a second apart each paid
+    /// for it in full.
+    search_indexes: Mutex<HashMap<String, CachedIndex>>,
+}
+
+struct CachedIndex {
+    index: Arc<crate::bm25::Bm25Index>,
+    /// What the tree looked like when `index` was built. Re-checked on
+    /// every search; see `TreeFingerprint` for why this rather than the
+    /// file watcher.
+    fingerprint: crate::bm25::TreeFingerprint,
+    /// Last use, so the idle reaper can drop indexes for projects that
+    /// have gone quiet instead of holding them for the daemon's lifetime.
+    used_at: i64,
 }
 
 impl Manager {
@@ -122,6 +148,7 @@ impl Manager {
                 servers: Mutex::new(HashMap::new()),
                 create_locks: Mutex::new(HashMap::new()),
                 watcher: WatcherManager::new(tx),
+                search_indexes: Mutex::new(HashMap::new()),
             },
             rx,
         )
@@ -458,6 +485,73 @@ impl Manager {
         for root in removed_roots {
             self.stop_watcher_if_unused(&root).await;
         }
+
+        // Drop search indexes for projects that have gone quiet. Each one
+        // holds every symbol in its project in memory, so they shouldn't
+        // outlive interest in the project any more than a warm server does.
+        self.search_indexes
+            .lock()
+            .await
+            .retain(|_, entry| !is_stale(entry.used_at, now, cutoff_ms));
+    }
+
+    /// BM25 fallback search, reusing a cached index when the tree has not
+    /// changed since it was built.
+    ///
+    /// The fingerprint is computed *outside* the lock: it is a stat walk,
+    /// and holding the index map across it would serialize unrelated
+    /// projects' searches behind each other.
+    pub async fn search(
+        &self,
+        project_root: &str,
+        query: &str,
+    ) -> Vec<crate::protocol::SymbolInformation> {
+        let fingerprint = {
+            let root = project_root.to_string();
+            // Blocking filesystem work; keep it off the async runtime's
+            // worker so a large tree doesn't stall other requests.
+            tokio::task::spawn_blocking(move || crate::bm25::TreeFingerprint::of(&root))
+                .await
+                .unwrap_or_else(|_| crate::bm25::TreeFingerprint::of(project_root))
+        };
+
+        let cached = {
+            let mut indexes = self.search_indexes.lock().await;
+            match indexes.get_mut(project_root) {
+                Some(entry) if entry.fingerprint == fingerprint => {
+                    entry.used_at = now_ms();
+                    Some(entry.index.clone())
+                }
+                _ => None,
+            }
+        };
+
+        let index = match cached {
+            Some(index) => index,
+            None => {
+                let root = project_root.to_string();
+                let built =
+                    tokio::task::spawn_blocking(move || crate::bm25::Bm25Index::build(&root))
+                        .await
+                        .unwrap_or_else(|_| crate::bm25::Bm25Index::build(project_root));
+                let index = Arc::new(built);
+                self.search_indexes.lock().await.insert(
+                    project_root.to_string(),
+                    CachedIndex {
+                        index: index.clone(),
+                        fingerprint,
+                        used_at: now_ms(),
+                    },
+                );
+                index
+            }
+        };
+
+        index
+            .search(query)
+            .into_iter()
+            .map(|(_, sym)| sym.clone())
+            .collect()
     }
 
     pub async fn delete(&self, req: DeleteRequest) -> Vec<ManagedServerInfo> {
@@ -642,6 +736,13 @@ async fn notify_handler(
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+async fn search_handler(
+    State(m): State<SharedManager>,
+    Json(req): Json<SearchRequest>,
+) -> Json<Vec<crate::protocol::SymbolInformation>> {
+    Json(m.search(&req.project_root, &req.query).await)
+}
+
 async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
     // Snapshot then release, as in `delete`/`reap_idle`: each `shutdown()`
     // awaits up to 3s, and holding the map lock across all of them blocks
@@ -672,6 +773,7 @@ pub fn app(manager: SharedManager) -> Router {
         .route("/list", get(list_handler))
         .route("/create", post(create_handler))
         .route("/delete", delete(delete_handler))
+        .route("/search", post(search_handler))
         .route("/request", post(request_handler))
         .route("/notify", post(notify_handler))
         .route("/shutdown", post(shutdown_handler))

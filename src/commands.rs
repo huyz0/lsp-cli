@@ -979,12 +979,7 @@ pub async fn run_search(
         .unwrap_or_default();
 
     if results.is_empty() {
-        let index = Bm25Index::build(&project_root);
-        results = index
-            .search(query)
-            .into_iter()
-            .map(|(_, s)| s.clone())
-            .collect();
+        results = bm25_search(&project_root, query).await;
     }
 
     if let Some(kinds) = kinds {
@@ -1078,6 +1073,26 @@ pub async fn run_search(
     }
 
     Ok(())
+}
+
+/// BM25 fallback search.
+///
+/// Prefers the daemon, which caches the index per project and rebuilds it
+/// only when the tree actually changes. Falls back to building in-process
+/// if the daemon can't be reached, so `lsp search` still works with no
+/// daemon available — just without the caching.
+async fn bm25_search(project_root: &str, query: &str) -> Vec<SymbolInformation> {
+    let client = ManagerClient::new();
+    if client.ensure_running().await.is_ok() {
+        if let Ok(results) = client.search(project_root, query).await {
+            return results;
+        }
+    }
+    Bm25Index::build(project_root)
+        .search(query)
+        .into_iter()
+        .map(|(_, s)| s.clone())
+        .collect()
 }
 
 async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInformation>> {
