@@ -13,6 +13,7 @@
 //! calling back into it directly — this keeps the watcher decoupled from
 //! `Manager`'s internals instead of needing a circular `Arc<Manager>`.
 
+use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -82,14 +83,14 @@ impl WatcherManager {
             // else that arrives within the debounce window before flushing
             // — same shape as the TS watcher's setTimeout-based debounce.
             while let Some(first) = event_rx.recv().await {
-                if let Some(v) = to_change(&first, &extensions) {
+                if let Some(v) = to_change(&first, &root, &extensions) {
                     pending.push(v);
                 }
                 while let Ok(Some(e)) =
                     tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv())
                         .await
                 {
-                    if let Some(v) = to_change(&e, &extensions) {
+                    if let Some(v) = to_change(&e, &root, &extensions) {
                         pending.push(v);
                     }
                 }
@@ -123,14 +124,30 @@ impl WatcherManager {
 }
 
 /// LSP `FileChangeType`: 1 = Created, 2 = Changed, 3 = Deleted.
-fn to_change(event: &notify::Event, extensions: &HashSet<String>) -> Option<Value> {
-    let path = event.paths.first()?;
+fn to_change(
+    event: &notify::Event,
+    project_root: &str,
+    extensions: &HashSet<String>,
+) -> Option<Value> {
+    // A rename delivers `[from, to]`; the destination is the path that now
+    // exists and is what a server needs told about. Taking only
+    // `paths.first()` meant a file renamed *into* the project was reported
+    // as a change to its old name and the new file was never announced.
+    let path = match event.kind {
+        EventKind::Modify(ModifyKind::Name(_)) if event.paths.len() > 1 => event.paths.last()?,
+        _ => event.paths.first()?,
+    };
 
-    let path_str = path.to_string_lossy();
-    if path_str.split('/').any(|c| c.starts_with('.'))
-        || ["node_modules", "dist", "build", "target"]
-            .iter()
-            .any(|d| path_str.contains(&format!("/{d}/")))
+    // Ignore checks run against the path *relative to the project root*.
+    // Testing the absolute path meant a project that merely lives under a
+    // dot-directory — `~/.config/nvim`, `~/.dotfiles` — matched on its own
+    // parent and had every single event discarded, so warm servers there
+    // never learned about external edits at all.
+    let relative = path.strip_prefix(project_root).unwrap_or(path);
+    let rel_str = relative.to_string_lossy();
+    if rel_str
+        .split('/')
+        .any(|c| c.starts_with('.') || matches!(c, "node_modules" | "dist" | "build" | "target"))
     {
         return None;
     }
@@ -147,13 +164,13 @@ fn to_change(event: &notify::Event, extensions: &HashSet<String>) -> Option<Valu
         _ => return None,
     };
 
-    Some(json!({ "uri": format!("file://{}", path.display()), "type": ty }))
+    Some(json!({ "uri": lsp::uri::from_path(path), "type": ty }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+    use notify::event::{CreateKind, RemoveKind, RenameMode};
 
     fn evt(kind: EventKind, path: &str) -> notify::Event {
         notify::Event {
@@ -167,15 +184,30 @@ mod tests {
     fn maps_create_modify_remove_to_lsp_file_change_types() {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
-            to_change(&evt(EventKind::Create(CreateKind::File), "/p/a.ts"), &exts).unwrap()["type"],
+            to_change(
+                &evt(EventKind::Create(CreateKind::File), "/p/a.ts"),
+                "/p",
+                &exts
+            )
+            .unwrap()["type"],
             1
         );
         assert_eq!(
-            to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"), &exts).unwrap()["type"],
+            to_change(
+                &evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"),
+                "/p",
+                &exts
+            )
+            .unwrap()["type"],
             2
         );
         assert_eq!(
-            to_change(&evt(EventKind::Remove(RemoveKind::File), "/p/a.ts"), &exts).unwrap()["type"],
+            to_change(
+                &evt(EventKind::Remove(RemoveKind::File), "/p/a.ts"),
+                "/p",
+                &exts
+            )
+            .unwrap()["type"],
             3
         );
     }
@@ -183,7 +215,12 @@ mod tests {
     #[test]
     fn filters_out_extensions_not_being_watched() {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
-        assert!(to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/a.py"), &exts).is_none());
+        assert!(to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/p/a.py"),
+            "/p",
+            &exts
+        )
+        .is_none());
     }
 
     #[test]
@@ -191,16 +228,19 @@ mod tests {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
         assert!(to_change(
             &evt(EventKind::Modify(ModifyKind::Any), "/p/.git/a.ts"),
+            "/p",
             &exts
         )
         .is_none());
         assert!(to_change(
             &evt(EventKind::Modify(ModifyKind::Any), "/p/node_modules/a.ts"),
+            "/p",
             &exts
         )
         .is_none());
         assert!(to_change(
             &evt(EventKind::Modify(ModifyKind::Any), "/p/dist/a.ts"),
+            "/p",
             &exts
         )
         .is_none());
@@ -209,7 +249,74 @@ mod tests {
     #[test]
     fn builds_a_file_uri_from_the_absolute_path() {
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
-        let v = to_change(&evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"), &exts).unwrap();
+        let v = to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"),
+            "/p",
+            &exts,
+        )
+        .unwrap();
         assert_eq!(v["uri"], "file:///p/a.ts");
+    }
+
+    #[test]
+    fn a_project_inside_a_dot_directory_still_reports_changes() {
+        // The ignore check runs on the path relative to the root. Applied
+        // to the absolute path, `.config` matched and every event for a
+        // project at ~/.config/nvim was silently dropped — so warm servers
+        // there never saw an external edit.
+        let exts: HashSet<String> = [".lua"].iter().map(|s| s.to_string()).collect();
+        let v = to_change(
+            &evt(
+                EventKind::Modify(ModifyKind::Any),
+                "/home/u/.config/nvim/init.lua",
+            ),
+            "/home/u/.config/nvim",
+            &exts,
+        );
+        assert!(v.is_some(), "event under a dot-directory root was dropped");
+    }
+
+    #[test]
+    fn dot_directories_below_the_root_are_still_ignored() {
+        let exts: HashSet<String> = [".lua"].iter().map(|s| s.to_string()).collect();
+        assert!(to_change(
+            &evt(
+                EventKind::Modify(ModifyKind::Any),
+                "/home/u/.config/nvim/.git/x.lua"
+            ),
+            "/home/u/.config/nvim",
+            &exts,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_rename_reports_the_destination_not_the_source() {
+        // notify delivers [from, to]. Reporting `from` told the server
+        // about a path that no longer exists and never mentioned the file
+        // that now does.
+        let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
+        let event = notify::Event {
+            kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            paths: vec![
+                std::path::PathBuf::from("/p/old.ts"),
+                std::path::PathBuf::from("/p/new.ts"),
+            ],
+            attrs: Default::default(),
+        };
+        let v = to_change(&event, "/p", &exts).unwrap();
+        assert_eq!(v["uri"], "file:///p/new.ts");
+    }
+
+    #[test]
+    fn paths_with_spaces_are_percent_encoded_in_the_uri() {
+        let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
+        let v = to_change(
+            &evt(EventKind::Modify(ModifyKind::Any), "/my proj/a.ts"),
+            "/my proj",
+            &exts,
+        )
+        .unwrap();
+        assert_eq!(v["uri"], "file:///my%20proj/a.ts");
     }
 }

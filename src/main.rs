@@ -744,7 +744,9 @@ async fn run_server(sub: &str, path: Option<&str>, all: bool, fmt: &OutputFormat
                     .to_string_lossy()
                     .to_string(),
             };
-            let info = client.create_server(&target).await?;
+            // No root override: `server start` is given a path (often a
+            // bare directory) and wants the daemon's own detection.
+            let info = client.create_server(&target, None).await?;
             println!("Started {} server for {}", info.language, info.project_root);
         }
         "stop" => {

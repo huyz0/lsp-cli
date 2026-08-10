@@ -3,6 +3,14 @@ name = "lsp"
 version = "0.1.0"
 edition = "2021"
 
+# Shared by the `lsp` binary and every bundled server under src/servers/.
+# Those servers are separate [[bin]] targets with their own crate roots, so
+# a library is the only way they can share code with each other or with the
+# CLI (see src/lib.rs).
+[lib]
+name = "lsp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lsp"
 path = "src/main.rs"
@@ -41,6 +49,10 @@ hyper = { version = "1.10.1", features = ["server", "http1"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 thiserror = "1"
 notify = "6"
+# `file:` URI escaping/unescaping (src/uri.rs). Already in the tree via
+# reqwest/url; depended on directly now that we build and parse URIs
+# ourselves rather than string-concatenating them.
+percent-encoding = "2"
 
 # For the bundled Rust-native language servers (src/servers/) — same crates
 # rust-analyzer itself uses for the server side of the protocol (lsp_client.rs

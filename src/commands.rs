@@ -9,7 +9,9 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use lsp::text_pos::utf16_col_to_byte;
 
 /// How long to wait after `didOpen`/`didChange` before issuing the actual
 /// request, giving the server time to build its AST. Empirically tuned —
@@ -17,7 +19,7 @@ use std::path::Path;
 /// behind this number and README "Reliability fixes" for the full history.
 const DIDOPEN_SETTLE_DELAY_MS: u64 = 3000;
 
-use crate::bm25::Bm25Index;
+use crate::bm25::{is_ignored_dir_name, Bm25Index};
 use crate::format::OutputFormat;
 use crate::locate::resolve_locate;
 use crate::manager_client::ManagerClient;
@@ -96,7 +98,10 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
 
     client.ensure_running().await?;
     client
-        .create_server(&ctx.file_path.to_string_lossy())
+        .create_server(
+            &ctx.file_path.to_string_lossy(),
+            Some(&ctx.project_root.to_string_lossy()),
+        )
         .await?;
     // The daemon (`Manager::proxy_notify`) turns this into a `didChange`
     // instead of a second `didOpen` when the file is already open in this
@@ -474,10 +479,17 @@ fn collect_edits(edit: &WorkspaceEdit) -> (Vec<(String, Vec<TextEdit>)>, usize) 
 /// so that applying one edit never invalidates the line/character offsets
 /// of edits still pending — the offsets in a `WorkspaceEdit` are all
 /// relative to the *original* unmodified document, per the LSP spec.
-/// Character offsets are treated as Unicode scalar (`char`) indices, not
-/// strict UTF-16 code units — the same simplification `locate.rs` already
-/// makes elsewhere in this codebase; fine for the overwhelmingly-ASCII
-/// identifiers a rename actually touches.
+///
+/// Character offsets are UTF-16 code units, per the spec and per what
+/// `lsp_client.rs::initialize` negotiates (it declares no
+/// `positionEncodings`, so UTF-16 is mandatory). This used to index a
+/// `Vec<char>` with those offsets, which is only correct while every
+/// character on the line is in the Basic Multilingual Plane: a single
+/// astral character (emoji, `𝕏`) earlier on the line shifts every
+/// subsequent offset by one and the edit lands in the wrong place. Since
+/// this is the one code path in the tool that writes to disk, that
+/// mis-slice silently corrupted the file rather than merely returning a
+/// wrong answer.
 fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
     let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
     let mut sorted: Vec<&TextEdit> = edits.iter().collect();
@@ -496,23 +508,20 @@ fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
             continue; // stale edit against content that's shifted since the server computed it
         }
         if start_line == end_line {
-            let chars: Vec<char> = lines[start_line].chars().collect();
-            let start_ch = (edit.range.start.character as usize).min(chars.len());
-            let end_ch = (edit.range.end.character as usize).min(chars.len());
-            let before: String = chars[..start_ch].iter().collect();
-            let after: String = chars[end_ch..].iter().collect();
-            lines[start_line] = format!("{before}{}{after}", edit.new_text);
+            let line = &lines[start_line];
+            let start_b = utf16_col_to_byte(line, edit.range.start.character);
+            let end_b = utf16_col_to_byte(line, edit.range.end.character).max(start_b);
+            lines[start_line] = format!("{}{}{}", &line[..start_b], edit.new_text, &line[end_b..]);
         } else if end_line < lines.len() {
-            let start_chars: Vec<char> = lines[start_line].chars().collect();
-            let end_chars: Vec<char> = lines[end_line].chars().collect();
-            let start_ch = (edit.range.start.character as usize).min(start_chars.len());
-            let end_ch = (edit.range.end.character as usize).min(end_chars.len());
-            let before: String = start_chars[..start_ch].iter().collect();
-            let after: String = end_chars[end_ch..].iter().collect();
-            lines.splice(
-                start_line..=end_line,
-                [format!("{before}{}{after}", edit.new_text)],
+            let start_b = utf16_col_to_byte(&lines[start_line], edit.range.start.character);
+            let end_b = utf16_col_to_byte(&lines[end_line], edit.range.end.character);
+            let merged = format!(
+                "{}{}{}",
+                &lines[start_line][..start_b],
+                edit.new_text,
+                &lines[end_line][end_b..]
             );
+            lines.splice(start_line..=end_line, [merged]);
         }
     }
     lines.join("\n")
@@ -562,12 +571,27 @@ pub async fn run_rename(
     let (files_with_edits, skipped_ops) = collect_edits(&edit);
 
     if apply {
+        // Two phases on purpose. Reading every file and computing every
+        // replacement *before* writing any of them means an unreadable
+        // file (or one whose edits don't apply) aborts with the workspace
+        // untouched. Interleaving read/write per file, as this used to,
+        // left files 1..N-1 renamed and the rest not — a silently
+        // half-renamed codebase, which is the specific failure the
+        // preview-by-default design exists to avoid.
+        let mut staged: Vec<(PathBuf, String)> = Vec::with_capacity(files_with_edits.len());
         for (uri, edits) in &files_with_edits {
-            let path = uri.strip_prefix("file://").unwrap_or(uri);
-            let original = std::fs::read_to_string(path)
-                .map_err(|e| anyhow!("Cannot read {path} to apply rename: {e}"))?;
-            let updated = apply_text_edits(&original, edits);
-            std::fs::write(path, updated).map_err(|e| anyhow!("Cannot write {path}: {e}"))?;
+            let path = lsp::uri::to_path(uri);
+            let original = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow!(
+                    "Cannot read {} to apply rename (no files were modified): {e}",
+                    path.display()
+                )
+            })?;
+            staged.push((path, apply_text_edits(&original, edits)));
+        }
+        for (path, updated) in staged {
+            std::fs::write(&path, updated)
+                .map_err(|e| anyhow!("Cannot write {}: {e}", path.display()))?;
         }
     }
 
@@ -1008,9 +1032,16 @@ async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInf
     let root_path = Path::new(project_root);
     // Find any recognized source file directly under the project root to determine
     // which language server to launch.
-    let (entry, language) = walkdir::WalkDir::new(root_path)
+    // Skip the same directories the BM25 indexer skips. Without this the
+    // "representative source file" could be picked out of `node_modules/`,
+    // `target/`, or `.git/`, which both wastes the walk and can start a
+    // server rooted at a vendored copy of someone else's code. The
+    // `depth() == 0` guard keeps the root itself from being pruned when
+    // the project directory is a dotfile directory (`~/.dotfiles`).
+    let (entry, _) = walkdir::WalkDir::new(root_path)
         .max_depth(4)
         .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir_name(&e.file_name().to_string_lossy()))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .find_map(|e| registry::detect_language(e.path()).map(|lang| (e, lang.name)))
@@ -1018,13 +1049,20 @@ async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInf
 
     let client = ManagerClient::new();
     client.ensure_running().await?;
-    client
-        .create_server(&entry.path().to_string_lossy())
+    // Use the language the daemon actually registered, not the one
+    // `detect_language` guessed. The two disagree for Deno: extension
+    // detection deliberately skips `deno` (it shares `.ts` with
+    // typescript), while the daemon's root detection prefers it when a
+    // `deno.json` is present — so asking for "typescript" here never
+    // matched the running server and every Deno search silently fell
+    // through to the BM25 index.
+    let info = client
+        .create_server(&entry.path().to_string_lossy(), Some(project_root))
         .await?;
     let result = client
         .proxy_request(
             project_root,
-            Some(language),
+            Some(&info.language),
             "workspace/symbol",
             json!({ "query": query }),
         )
@@ -1080,6 +1118,40 @@ mod tests {
         let content = "fn greet() {}\n";
         let out = apply_text_edits(content, &[edit(0, 3, 0, 8, "say_hi")]);
         assert_eq!(out, "fn say_hi() {}\n");
+    }
+
+    #[test]
+    fn apply_text_edits_uses_utf16_offsets_not_char_offsets() {
+        // An astral character before the edit is where UTF-16 offsets and
+        // `char` offsets diverge: "😀" is one char but two UTF-16 code
+        // units, so the server reports `oldName` at columns 14..21 while
+        // it sits at chars 13..20. Indexing a Vec<char> with the server's
+        // numbers used to splice one character off, producing
+        // `let s = "😀"; onewName);` — and, because this is the rename
+        // write path, saving that to disk.
+        let content = "let s = \"😀\"; oldName();\n";
+        let out = apply_text_edits(content, &[edit(0, 14, 0, 21, "newName")]);
+        assert_eq!(out, "let s = \"😀\"; newName();\n");
+    }
+
+    #[test]
+    fn apply_text_edits_handles_bmp_characters() {
+        // Accents and CJK are one UTF-16 unit each, so these offsets agree
+        // under either interpretation — a guard that the fix didn't break
+        // the majority case it used to get right.
+        let content = "let café = 1; let oldName = 2;\n";
+        let out = apply_text_edits(content, &[edit(0, 18, 0, 25, "newName")]);
+        assert_eq!(out, "let café = 1; let newName = 2;\n");
+    }
+
+    #[test]
+    fn apply_text_edits_multiline_splice_uses_utf16_offsets_on_both_ends() {
+        let content = "let a = \"😀\"; start\nmiddle\nend \"😀\" tail\n";
+        // Start col 14 is just past the emoji on line 0. On line 2,
+        // `end "😀" tail`, the emoji occupies UTF-16 columns 5-6, so
+        // column 8 is the space before `tail` and column 9 is its `t`.
+        let out = apply_text_edits(content, &[edit(0, 14, 2, 8, "X")]);
+        assert_eq!(out, "let a = \"😀\"; X tail\n");
     }
 
     #[test]

@@ -856,6 +856,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "notify",
+ "percent-encoding",
  "regex",
  "reqwest",
  "serde",

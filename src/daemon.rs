@@ -41,6 +41,15 @@ pub struct ManagedServerInfo {
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
     pub path: String,
+    /// Project root the caller has already resolved, when it differs from
+    /// what the daemon would detect on its own — i.e. when the user passed
+    /// `--project`. Without this the daemon re-derived the root from
+    /// `path` and keyed the server on *that*, while every follow-up
+    /// `/request` and `/notify` looked the server up by the caller's root.
+    /// The two never matched, so `--project` failed every navigation
+    /// command with "No server running for project: <root>".
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -129,7 +138,11 @@ impl Manager {
             .collect()
     }
 
-    pub async fn create(&self, path: &str) -> Result<ManagedServerInfo> {
+    pub async fn create(
+        &self,
+        path: &str,
+        project_root_override: Option<&str>,
+    ) -> Result<ManagedServerInfo> {
         let file_path = std::path::Path::new(path);
         let detected = detect_project_root(file_path)
             .or_else(|| {
@@ -143,7 +156,15 @@ impl Manager {
             })
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for path: {path}"))?;
 
-        let root = detected.root.to_string_lossy().to_string();
+        // The caller's root wins when it supplied one, so the key this
+        // server is registered under is the same string later `/request`
+        // and `/notify` calls will look it up by. The *language* still
+        // comes from detection — an override says where the project is,
+        // not what it's written in.
+        let root = match project_root_override {
+            Some(r) => r.to_string(),
+            None => detected.root.to_string_lossy().to_string(),
+        };
         let key = format!("{root}::{}", detected.lang.name);
 
         // Held for the whole spawn+initialize sequence below — see the
@@ -188,15 +209,13 @@ impl Manager {
                     info.pid = c.pid();
                     c
                 }
-                Err(e) => {
-                    info.status = "stopped".into();
-                    return Err(e);
-                }
+                // No `info.status = "stopped"` on these paths: `info` is a
+                // local that is dropped immediately, so the write never
+                // reached `servers`, `list()`, or the caller. It read as
+                // if failed servers were tracked when nothing tracks them.
+                Err(e) => return Err(e),
             },
-            Err(e) => {
-                info.status = "stopped".into();
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
         self.watcher
@@ -216,11 +235,22 @@ impl Manager {
     /// `workspace/didChangeWatchedFiles` batches. Best-effort: a send
     /// failure on one server doesn't stop delivery to the others.
     pub async fn broadcast_notify(&self, project_root: &str, method: &str, params: Value) {
-        let servers = self.servers.lock().await;
-        for s in servers.values() {
-            if s.info.project_root == project_root && s.info.status == "running" {
-                let _ = s.client.lock().await.notify(method, params.clone()).await;
-            }
+        // Snapshot the client handles, then release `servers` before
+        // notifying. Holding the map lock across `client.lock().await`
+        // meant a single in-flight request (which holds its client lock for
+        // up to the 120s request ceiling) blocked every other project's
+        // `/list`, `/create`, and `/request` for as long as it ran. This is
+        // the file-watcher path, so it fires on every debounced batch.
+        let targets: Vec<Arc<Mutex<LspClient>>> = {
+            let servers = self.servers.lock().await;
+            servers
+                .values()
+                .filter(|s| s.info.project_root == project_root && s.info.status == "running")
+                .map(|s| s.client.clone())
+                .collect()
+        };
+        for client in targets {
+            let _ = client.lock().await.notify(method, params.clone()).await;
         }
     }
 
@@ -409,8 +439,13 @@ impl Manager {
     }
 
     pub async fn delete(&self, req: DeleteRequest) -> Vec<ManagedServerInfo> {
-        let mut stopped = Vec::new();
-        {
+        // Remove the entries under the lock, then shut them down after
+        // releasing it — the same pattern `reap_idle` uses. `shutdown()`
+        // awaits a 3s timeout per server, so doing this under the map lock
+        // made `lsp server stop --all` with five warm servers hold the one
+        // `servers` mutex for up to 15 seconds, blocking every concurrent
+        // request the daemon was serving.
+        let removed: Vec<ManagedServer> = {
             let mut servers = self.servers.lock().await;
             let keys: Vec<String> = if req.all {
                 servers.keys().cloned().collect()
@@ -425,12 +460,15 @@ impl Manager {
             } else {
                 vec![]
             };
-            for key in keys {
-                if let Some(entry) = servers.remove(&key) {
-                    entry.client.lock().await.shutdown().await;
-                    stopped.push(entry.info);
-                }
-            }
+            keys.into_iter()
+                .filter_map(|k| servers.remove(&k))
+                .collect()
+        };
+
+        let mut stopped = Vec::new();
+        for entry in removed {
+            entry.client.lock().await.shutdown().await;
+            stopped.push(entry.info);
         }
         let mut seen_roots = std::collections::HashSet::new();
         for info in &stopped {
@@ -448,6 +486,13 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+
+/// How long the shutdown handler waits before calling `process::exit`, so
+/// the HTTP 204 makes it back to the client that asked for the shutdown.
+const EXIT_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How often the idle reaper scans for servers to evict.
+const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Pure predicate extracted out of reap_idle for direct unit testing.
 fn is_stale(idle_since: i64, now: i64, cutoff_ms: i64) -> bool {
@@ -471,7 +516,7 @@ async fn create_handler(
     State(m): State<SharedManager>,
     Json(req): Json<CreateRequest>,
 ) -> Result<Json<ManagedServerInfo>, (axum::http::StatusCode, String)> {
-    m.create(&req.path)
+    m.create(&req.path, req.project_root.as_deref())
         .await
         .map(Json)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -515,14 +560,25 @@ async fn notify_handler(
 }
 
 async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
-    let servers = m.servers.lock().await;
-    for s in servers.values() {
-        s.client.lock().await.shutdown().await;
+    // Snapshot then release, as in `delete`/`reap_idle`: each `shutdown()`
+    // awaits up to 3s, and holding the map lock across all of them blocks
+    // any request still in flight while we're trying to exit.
+    let clients: Vec<Arc<Mutex<LspClient>>> = {
+        let servers = m.servers.lock().await;
+        servers.values().map(|s| s.client.clone()).collect()
+    };
+    for client in clients {
+        client.lock().await.shutdown().await;
     }
-    drop(servers);
     m.watcher.dispose().await;
     tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(EXIT_GRACE_PERIOD).await;
+        // Remove the socket before exiting. `process::exit` skips the
+        // cleanup at the end of `start_daemon`, so a graceful shutdown used
+        // to leave the socket file behind with nothing listening — after
+        // which every `connect()` got ECONNREFUSED (rather than the
+        // ENOENT that says "no daemon") until something rebound it.
+        let _ = std::fs::remove_file(socket_path());
         std::process::exit(0);
     });
     axum::http::StatusCode::NO_CONTENT
@@ -592,7 +648,7 @@ pub async fn start_daemon() -> Result<()> {
     let idle_timeout = std::time::Duration::from_secs(cfg.idle_timeout);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(REAP_INTERVAL).await;
             idle_manager.reap_idle(idle_timeout).await;
         }
     });

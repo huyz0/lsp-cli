@@ -44,8 +44,16 @@ impl ManagerClient {
         Self
     }
 
+    /// Liveness probe. Deliberately does *not* go through `raw_request`'s
+    /// retry loop: "is a daemon listening?" is a question whose answer is
+    /// legitimately "no", and retrying it burned the full 150+300+450+600ms
+    /// backoff before returning false. That cost was paid three times on
+    /// every cold navigation command (here, in `ensure_running`, and again
+    /// in `spawn_daemon_and_wait`) — about 4.5s of pure sleeping before the
+    /// daemon process was even forked — and it stretched
+    /// `wait_for_alive`'s intended 100ms poll interval to ~1.6s.
     pub async fn is_alive(&self) -> bool {
-        raw_request("GET", "/list", None).await.is_ok()
+        raw_request_once("GET", "/list", None).await.is_ok()
     }
 
     /// Starts the background daemon if none is running, serialized across
@@ -148,8 +156,17 @@ impl ManagerClient {
         Ok(serde_json::from_str(&body)?)
     }
 
-    pub async fn create_server(&self, path: &str) -> Result<ManagedServerInfo> {
-        let body = serde_json::json!({ "path": path }).to_string();
+    /// `project_root` is the root the caller resolved (see
+    /// `project::resolve_project`). Passing it keeps the daemon's registry
+    /// key identical to the key later `proxy_request`/`proxy_notify` calls
+    /// use; omitting it lets the daemon detect one itself, which is what
+    /// `lsp server start <dir>` wants.
+    pub async fn create_server(
+        &self,
+        path: &str,
+        project_root: Option<&str>,
+    ) -> Result<ManagedServerInfo> {
+        let body = serde_json::json!({ "path": path, "project_root": project_root }).to_string();
         let (status, resp) = raw_request("POST", "/create", Some(body)).await?;
         if status != 200 {
             bail!("{resp}");

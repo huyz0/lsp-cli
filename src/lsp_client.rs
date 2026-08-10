@@ -309,7 +309,7 @@ impl LspClient {
     }
 
     pub async fn initialize(&mut self, workspace_root: &str) -> Result<Value> {
-        let uri = format!("file://{workspace_root}");
+        let uri = lsp::uri::from_path(std::path::Path::new(workspace_root));
         let name = std::path::Path::new(workspace_root)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -355,10 +355,17 @@ impl LspClient {
     }
 }
 
+/// Read chunk size. Large enough that a typical response arrives in one or
+/// two reads; the framing below handles arbitrary splits either way.
+const READ_CHUNK_BYTES: usize = 8192;
+
+/// Length of the `\r\n\r\n` sequence terminating an LSP header block.
+const HEADER_TERMINATOR_LEN: usize = 4;
+
 async fn read_loop(stdout: tokio::process::ChildStdout, tx: mpsc::UnboundedSender<Value>) {
     let mut reader = BufReader::new(stdout);
     let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 8192];
+    let mut chunk = [0u8; READ_CHUNK_BYTES];
 
     loop {
         match reader.read(&mut chunk).await {
@@ -367,29 +374,57 @@ async fn read_loop(stdout: tokio::process::ChildStdout, tx: mpsc::UnboundedSende
             Err(_) => break,
         }
 
-        loop {
-            let header_end = find_header_end(&buf);
-            let Some(header_end) = header_end else { break };
-            let header_str = String::from_utf8_lossy(&buf[..header_end]);
-            let len = header_str
-                .lines()
-                .find_map(|l| {
-                    l.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .map(|v| v.trim().to_string())
-                })
-                .and_then(|v| v.parse::<usize>().ok());
-            let Some(len) = len else { break };
-            let body_start = header_end + 4;
-            if buf.len() < body_start + len {
-                break;
-            }
-            let body = &buf[body_start..body_start + len];
-            if let Ok(v) = serde_json::from_slice::<Value>(body) {
-                let _ = tx.send(v);
-            }
-            buf.drain(..body_start + len);
+        for msg in drain_messages(&mut buf) {
+            let _ = tx.send(msg);
         }
+    }
+}
+
+/// Pulls every complete message out of `buf`, consuming exactly the bytes
+/// it parsed and leaving any partial trailing message in place.
+///
+/// Split out of `read_loop` so the framing can be tested directly — the
+/// loop itself needs a real `ChildStdout`, so the framing tests used to
+/// re-implement this parser by hand and therefore couldn't catch a bug in
+/// it.
+fn drain_messages(buf: &mut Vec<u8>) -> Vec<Value> {
+    let mut out = Vec::new();
+    loop {
+        let Some(header_end) = find_header_end(buf) else {
+            return out;
+        };
+        let header_str = String::from_utf8_lossy(&buf[..header_end]);
+        let len = header_str
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().to_string())
+            })
+            .and_then(|v| v.parse::<usize>().ok());
+        let Some(len) = len else {
+            // A header block with no parseable Content-Length is not an
+            // LSP message — a server that wrote a banner or a log line to
+            // stdout, say. Discard it and resynchronize.
+            //
+            // This used to return without consuming anything, which was
+            // unrecoverable: the caller appended more bytes,
+            // `find_header_end` re-found the *same* terminator (it always
+            // returns the first one), and gave up again. From the first
+            // stray byte onward no message was ever parsed again, every
+            // request ran out its 30s idle and 120s wall-clock timeouts,
+            // and `buf` grew for the life of the process.
+            buf.drain(..header_end + HEADER_TERMINATOR_LEN);
+            continue;
+        };
+        let body_start = header_end + HEADER_TERMINATOR_LEN;
+        if buf.len() < body_start + len {
+            return out; // body still in flight; keep the partial frame
+        }
+        if let Ok(v) = serde_json::from_slice::<Value>(&buf[body_start..body_start + len]) {
+            out.push(v);
+        }
+        buf.drain(..body_start + len);
     }
 }
 
@@ -413,47 +448,103 @@ mod tests {
         assert_eq!(find_header_end(buf), None);
     }
 
+    /// Frames a JSON value the way a server would put it on the wire.
+    fn framed(v: Value) -> String {
+        let body = v.to_string();
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
+    }
+
+    // These exercise `drain_messages`, the real parser. They previously
+    // re-implemented header parsing inline and asserted against their own
+    // reimplementation, so a bug in the production path passed unnoticed —
+    // including the resynchronization bug the last test here covers.
+
     #[test]
-    fn frames_a_message_with_correct_byte_length() {
-        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
-        let body = serde_json::to_string(&msg).unwrap();
-        let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        let bytes = framed.as_bytes();
-
-        let header_end = find_header_end(bytes).unwrap();
-        let header_str = String::from_utf8_lossy(&bytes[..header_end]);
-        let len: usize = header_str
-            .lines()
-            .find_map(|l| {
-                l.to_ascii_lowercase()
-                    .strip_prefix("content-length:")
-                    .map(|v| v.trim().to_string())
-            })
-            .and_then(|v| v.parse().ok())
-            .unwrap();
-        assert_eq!(len, body.len());
-
-        let body_start = header_end + 4;
-        let parsed_body = &bytes[body_start..body_start + len];
-        let parsed: Value = serde_json::from_slice(parsed_body).unwrap();
-        assert_eq!(parsed["method"], "initialize");
+    fn parses_a_single_message_and_consumes_exactly_its_bytes() {
+        let mut buf =
+            framed(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+                .into_bytes();
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["method"], "initialize");
+        assert!(buf.is_empty(), "parsed bytes should be consumed");
     }
 
     #[test]
     fn parses_two_back_to_back_messages() {
-        let mk = |id: i64| {
-            let body = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null}).to_string();
-            format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
-        };
-        let combined = format!("{}{}", mk(1), mk(2));
-        let bytes = combined.as_bytes();
+        let mut buf = format!(
+            "{}{}",
+            framed(serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": null})),
+            framed(serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": null}))
+        )
+        .into_bytes();
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["id"], 1);
+        assert_eq!(msgs[1]["id"], 2);
+        assert!(buf.is_empty());
+    }
 
-        let first_end = find_header_end(bytes).unwrap();
-        let first_body_start = first_end + 4;
-        // crude len parse just for the test
-        let header = String::from_utf8_lossy(&bytes[..first_end]);
-        let len: usize = header.split(": ").nth(1).unwrap().trim().parse().unwrap();
-        let rest = &bytes[first_body_start + len..];
-        assert!(find_header_end(rest).is_some());
+    #[test]
+    fn a_partial_message_is_left_in_the_buffer_until_the_rest_arrives() {
+        let whole = framed(serde_json::json!({"jsonrpc": "2.0", "id": 7, "result": 42}));
+        let split_at = whole.len() - 5;
+        let mut buf = whole.as_bytes()[..split_at].to_vec();
+
+        assert!(drain_messages(&mut buf).is_empty(), "body not complete yet");
+        buf.extend_from_slice(&whole.as_bytes()[split_at..]);
+
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["id"], 7);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn resynchronizes_after_a_header_block_with_no_content_length() {
+        // A server that writes a non-LSP banner to stdout (jdtls and
+        // gradle-backed servers do) used to desync the reader permanently:
+        // the parser gave up without consuming the bad block, then re-found
+        // the same terminator on every subsequent read and gave up again,
+        // so no message was ever parsed for the life of the process.
+        let good = framed(serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "ok"}));
+        let mut buf = format!("Some-Header: banner\r\n\r\n{good}").into_bytes();
+
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 1, "should skip the junk block and recover");
+        assert_eq!(msgs[0]["result"], "ok");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn a_body_that_is_not_valid_json_is_dropped_without_desyncing() {
+        let good = framed(serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": "after"}));
+        let mut buf = format!("Content-Length: 3\r\n\r\nnot{good}").into_bytes();
+
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["result"], "after");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn header_name_matching_is_case_insensitive() {
+        let body = serde_json::json!({"id": 1}).to_string();
+        let mut buf = format!("content-length: {}\r\n\r\n{}", body.len(), body).into_bytes();
+        assert_eq!(drain_messages(&mut buf).len(), 1);
+    }
+
+    #[test]
+    fn extra_headers_alongside_content_length_are_tolerated() {
+        let body = serde_json::json!({"id": 9}).to_string();
+        let mut buf = format!(
+            "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes();
+        let msgs = drain_messages(&mut buf);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["id"], 9);
     }
 }

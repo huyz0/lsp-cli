@@ -4,6 +4,7 @@
 //! per language, then scores queries with the standard Okapi BM25 formula.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use walkdir::WalkDir;
 
 use crate::protocol::symbol_kind::{
@@ -318,11 +319,29 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
     out
 }
 
-const SOURCE_EXTS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "rs", "java", "kt", "c", "h", "cpp",
-    "cc", "cxx", "hpp", "hh", "hxx", "lua", "zig", "rb", "cs", "sh", "bash", "css", "scss", "less",
-    "json", "jsonc", "html", "htm",
-];
+/// Directory names never worth indexing or walking into: dependency trees,
+/// build output, and VCS metadata. Shared with `commands.rs::try_lsp_search`
+/// so the two walks can't drift apart.
+///
+/// Callers must exempt the walk root (`depth() == 0`) — see `Bm25Index::build`.
+pub fn is_ignored_dir_name(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "node_modules" | "target" | "dist" | "build")
+}
+
+/// Extensions the fallback index reads. Derived from the registry rather
+/// than hand-listed: this was previously a literal that had already drifted,
+/// missing `.mts`/`.cts` (typescript) and `.kts` (kotlin), so `lsp search`
+/// silently indexed nothing from those files whenever it fell back here.
+fn source_exts() -> &'static std::collections::HashSet<String> {
+    static EXTS: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    EXTS.get_or_init(|| {
+        crate::registry::languages()
+            .iter()
+            .flat_map(|l| l.extensions.iter())
+            .map(|e| e.trim_start_matches('.').to_string())
+            .collect()
+    })
+}
 
 impl Bm25Index {
     /// Build an index by walking the project root and extracting symbols from
@@ -331,13 +350,14 @@ impl Bm25Index {
         let mut docs = Vec::new();
         for entry in WalkDir::new(project_root)
             .into_iter()
+            // `depth() == 0` is the project root itself. walkdir applies
+            // this predicate to the root too and calls `skip_current_dir()`
+            // when it fails, which ends the walk immediately — so indexing
+            // a project that simply *lives* in a dotfile directory
+            // (`~/.dotfiles`, `~/.config/nvim`) produced an empty index and
+            // a confident "No matches found."
             .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                !(name.starts_with('.')
-                    || name == "node_modules"
-                    || name == "target"
-                    || name == "dist"
-                    || name == "build")
+                e.depth() == 0 || !is_ignored_dir_name(&e.file_name().to_string_lossy())
             })
             .filter_map(|e| e.ok())
         {
@@ -349,7 +369,7 @@ impl Bm25Index {
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            if !SOURCE_EXTS.contains(&ext) {
+            if !source_exts().contains(&ext.to_ascii_lowercase()) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(entry.path()) else {
