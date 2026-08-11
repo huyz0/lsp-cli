@@ -64,7 +64,14 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
 - **Locate resolver** (`src/locate.rs`): the `--scope`/`--find` location
   syntax (line numbers, line ranges, dotted symbol paths, `<|>` cursor
   marker, whitespace-insensitive matching), with unit tests.
-- **Language registry** (`src/registry.rs`): extension → language, project
+- **Language registry** (`src/registry.rs`): the source of truth for what
+  languages exist. `install.rs` derives its managed-language list from this
+  rather than keeping its own, and dispatches installs through one
+  `Handler` per language instead of two parallel `match` statements that
+  had to stay in lockstep with a hand-written list. Adding a language is a
+  registry entry plus one `Handler` arm, both compiler-checked.
+
+  Extension → language, project
   root marker detection (walks up the directory tree, canonicalizing the
   containing directory so the same project always resolves to the same
   `project_root` key regardless of which code path detected it: a bare
@@ -73,7 +80,9 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
   mapping for every supported language.
 - **Formatters** (`src/format.rs`): JSON and Markdown output for every
   command (1-based line numbers, consistent JSON keys, consistent icons in
-  Markdown output).
+  Markdown output). Every command goes through here; `search` and `locate`
+  used to render inline in `commands.rs`, which is why they were the two
+  with no formatter tests.
 - **Config loading** (`src/config.rs`): reads `~/.lsp-cli/config.json`,
   merges over defaults, never errors on a missing/malformed file. All three
   keys are live: `idleTimeout` (seconds) drives the daemon's reaper,
@@ -199,11 +208,16 @@ below, no download at all); `typescript`/`python` run `npm
 install <package>` into `~/.lsp-cli/packages/` and write a `#!/bin/sh`
 wrapper into `~/.lsp-cli/servers/` that execs `node <entry> "$@"`; `go`
 runs `go install golang.org/x/tools/gopls@latest` into an isolated
-`GOPATH` (`~/.lsp-cli/go/`) and symlinks the result in; `rust` and
-`kotlin` fetch the latest GitHub Release asset (via `reqwest`), staged in
-a fresh per-download temp directory (`create_dir`, which fails rather than
-follows a pre-planted symlink at a predictable path) and extracted with
-the system `gunzip`/`unzip`; `java` fetches Eclipse's
+`GOPATH` (`~/.lsp-cli/go/`) and symlinks the result in; `rust`, `kotlin`, `cpp`, `lua` and `zig`
+fetch the latest GitHub Release asset (via `reqwest`), staged in a fresh
+per-download temp directory (`create_dir`, which fails rather than follows
+a pre-planted symlink at a predictable path) and extracted with the system
+`gunzip`/`unzip`/`tar`. All five go through one `install_from_release`
+driven by a `ReleaseSpec` describing the repo, the asset name and the
+archive layout — they were five near-identical copies, which is how they
+came to disagree about staging extraction inside the install directory
+(needed to avoid an `EXDEV` cross-filesystem rename) and about verifying
+the binary appeared; `java` fetches Eclipse's
 `jdt-language-server-latest.tar.gz`, extracts it to
 `~/.lsp-cli/servers/jdtls-dist/`, and writes a wrapper script pinning in a
 JDK it finds via `~/.sdkman/candidates/java/current`, `$JAVA_HOME`, or
