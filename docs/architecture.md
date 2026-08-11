@@ -106,6 +106,19 @@ socket. Also watches each project root for file changes and pushes
 debounced `workspace/didChangeWatchedFiles` notifications to live servers.
 See `src/watcher.rs`.
 
+The watcher registers one **non-recursive** watch per directory that
+survives the shared ignore list, rather than a single recursive watch on the
+project root. On Linux a recursive watch is one inotify descriptor per
+directory underneath, including every directory in `target/`,
+`node_modules/` and `.git/` — commonly tens of thousands for a Rust project,
+against a default `max_user_watches` of 8192. Filtering after delivery (as
+it used to) saved neither the descriptors nor the wakeups. Measured on a
+tree with 11 real directories and 1515 ignored ones: 11 watches. Directories
+created later are picked up from their own create events, subtree included,
+since a non-recursive watch does not cover them. Batches also have a hard
+flush deadline, because the debounce window re-arms on every event and a
+build would otherwise defer the flush indefinitely.
+
 `create()` (spawning a server for a project) is guarded by a
 per-project-root+language lock, not a single global lock, so starting a
 server for one project never blocks starting a server for an unrelated
@@ -144,16 +157,32 @@ It's evicted only by `lsp server stop`, an idle timeout, or a detected crash.
 
 Two different waits cover two different problems.
 
-A **cold start** is handled in the daemon: `Manager::create` polls
-`textDocument/documentSymbol` until the freshly spawned server answers
-(`daemon.rs::wait_until_indexed`), still holding the per-project create
-lock. Doing it there rather than in the CLI matters, because a second
-command arriving mid-cold-start would otherwise see an entry that exists,
-treat it as warm, and query a server that is still loading. Servers differ
-by an order of magnitude here — gopls replies `no package metadata` and
-rust-analyzer replies nothing until their initial load finishes — so
-waiting for the observed condition beats any constant sized for the
-slowest.
+A **cold start** is handled in the daemon (`daemon.rs::wait_until_indexed`),
+still holding the per-project create lock. Doing it there rather than in the
+CLI matters: a second command arriving mid-cold-start would otherwise see an
+entry that exists, treat it as warm, and query a server that is still
+loading.
+
+It waits in two phases, because "ready" is not one thing:
+
+1. `textDocument/documentSymbol` until the server returns symbols. This is
+   answered from the parse alone, so it proves the file has been read —
+   which is all `outline` needs.
+2. `textDocument/hover`, at the first symbol phase 1 found, until the server
+   returns *any* result rather than an error. This is the part phase 1 does
+   not prove. gopls answers documentSymbol happily while replying to hover
+   and definition with `no package metadata for file` until its initial
+   package load finishes, so stopping after phase 1 hands back a server that
+   can outline but cannot do anything type-aware. The signal is the shape of
+   the reply, not its content: a loading server errors, a ready one returns
+   a result (possibly `null`, if there is nothing to say about that
+   position), so this also cannot spin on a symbol that has no hover text.
+
+Servers differ by an order of magnitude in how long that takes, so waiting
+for the observed condition beats any constant sized for the slowest. As a
+backstop, `commands.rs::proxy_request_with_retry` retries a read-only
+request that comes back empty *or* errors, since both are how a server
+signals it is still warming up.
 
 A **warm** server still gets a fixed `WARM_SETTLE_DELAY_MS` (3000ms) after
 `didOpen`/`didChange`, because a single-document change has no equivalent

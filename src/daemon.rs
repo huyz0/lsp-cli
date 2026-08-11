@@ -647,26 +647,77 @@ async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &
     }
 
     let deadline = std::time::Instant::now() + INDEX_READY_TIMEOUT;
+
+    // Phase 1: syntax. `documentSymbol` is answered from the parse alone,
+    // so this returns as soon as the file has been read — which is what
+    // `outline` needs, and no more than that.
+    let Some(probe_position) = poll_document_symbol(client, &uri, deadline).await else {
+        return;
+    };
+
+    // Phase 2: types. This is the part `documentSymbol` does not prove.
+    // gopls answers hover and definition with `no package metadata for
+    // file` until its initial package load finishes, while happily
+    // answering documentSymbol throughout — so stopping after phase 1 hands
+    // back a server that can outline but cannot do anything type-aware, and
+    // the caller's first `doc` or `definition` fails.
+    //
+    // The signal is the *shape* of the reply, not its content: a server
+    // that is still loading returns an error, while one that is ready
+    // returns a result — possibly `null`, if there is genuinely nothing to
+    // say about that position. So this stops on any `Ok`, which also means
+    // it cannot spin on a symbol that simply has no hover text.
+    let hover = serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": probe_position,
+    });
     while std::time::Instant::now() < deadline {
+        if client
+            .request("textDocument/hover", hover.clone())
+            .await
+            .is_ok()
+        {
+            return;
+        }
         tokio::time::sleep(INDEX_POLL_INTERVAL).await;
-        // An error means "still loading" for several servers, so it is a
-        // reason to keep waiting rather than to stop.
+    }
+}
+
+/// Polls `documentSymbol` until the server returns at least one symbol, and
+/// yields a position inside the first one to probe type-readiness with.
+async fn poll_document_symbol(
+    client: &mut LspClient,
+    uri: &str,
+    deadline: std::time::Instant,
+) -> Option<Value> {
+    let params = serde_json::json!({ "textDocument": { "uri": uri } });
+    while std::time::Instant::now() < deadline {
+        // An error here means "still loading" for several servers, so it is
+        // a reason to keep waiting rather than to stop.
         if let Ok(v) = client
-            .request(
-                "textDocument/documentSymbol",
-                Value::Object(serde_json::Map::from_iter([(
-                    "textDocument".to_string(),
-                    serde_json::json!({ "uri": uri }),
-                )])),
-            )
+            .request("textDocument/documentSymbol", params.clone())
             .await
         {
-            let empty = v.is_null() || v.as_array().is_some_and(|a| a.is_empty());
-            if !empty {
-                return;
+            if let Some(pos) = first_symbol_position(&v) {
+                return Some(pos);
             }
         }
+        tokio::time::sleep(INDEX_POLL_INTERVAL).await;
     }
+    None
+}
+
+/// Start of the first symbol's name in a `documentSymbol` reply.
+///
+/// Handles both response shapes: hierarchical `DocumentSymbol[]`
+/// (`selectionRange`) and flat `SymbolInformation[]` (`location.range`).
+fn first_symbol_position(result: &Value) -> Option<Value> {
+    let first = result.as_array()?.first()?;
+    let range = first
+        .get("selectionRange")
+        .or_else(|| first.get("range"))
+        .or_else(|| first.get("location").and_then(|l| l.get("range")))?;
+    range.get("start").cloned()
 }
 
 /// How long the shutdown handler waits before calling `process::exit`, so
@@ -894,6 +945,46 @@ mod tests {
     // `is_stale` carries a doc comment saying it was "extracted out of
     // reap_idle for direct unit testing" — and then this file had no test
     // module at all. These are those tests.
+
+    // --- readiness probe ---------------------------------------------
+
+    #[test]
+    fn first_symbol_position_reads_the_hierarchical_shape() {
+        // DocumentSymbol[]: the name's own range is `selectionRange`.
+        let v = serde_json::json!([{
+            "name": "User",
+            "kind": 23,
+            "range": { "start": {"line": 2, "character": 0}, "end": {"line": 5, "character": 1} },
+            "selectionRange": { "start": {"line": 2, "character": 5}, "end": {"line": 2, "character": 9} }
+        }]);
+        let pos = first_symbol_position(&v).unwrap();
+        assert_eq!(pos["line"], 2);
+        assert_eq!(pos["character"], 5);
+    }
+
+    #[test]
+    fn first_symbol_position_reads_the_flat_shape() {
+        // SymbolInformation[]: no `range` at the top level, only
+        // `location.range`.
+        let v = serde_json::json!([{
+            "name": "User",
+            "kind": 23,
+            "location": {
+                "uri": "file:///a.go",
+                "range": { "start": {"line": 7, "character": 3}, "end": {"line": 7, "character": 7} }
+            }
+        }]);
+        let pos = first_symbol_position(&v).unwrap();
+        assert_eq!(pos["line"], 7);
+        assert_eq!(pos["character"], 3);
+    }
+
+    #[test]
+    fn first_symbol_position_is_none_when_there_is_nothing_to_probe() {
+        assert!(first_symbol_position(&serde_json::json!([])).is_none());
+        assert!(first_symbol_position(&serde_json::Value::Null).is_none());
+        assert!(first_symbol_position(&serde_json::json!([{ "name": "x" }])).is_none());
+    }
 
     #[test]
     fn a_server_idle_longer_than_the_cutoff_is_stale() {

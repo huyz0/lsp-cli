@@ -175,22 +175,30 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
 const MAX_EMPTY_RESULT_RETRIES: u32 = 3;
 const RETRY_BACKOFF_MS: u64 = 500;
 
-/// `ensure_daemon_session`'s fixed post-`didOpen` delay is an empirically
-/// tuned average, not a guarantee — under heavier system load (e.g. several
-/// warm servers competing for CPU, as happens when the test suite runs many
-/// language-server-backed integration tests concurrently), a server can
-/// still be mid-indexing once that delay elapses, and `definition`/`hover`
-/// come back empty/null even though the symbol genuinely exists. Reproduced
-/// live: `rust_lang.rs`'s cross-file `definition` and hover tests flaked
-/// under concurrent-suite load despite passing reliably in isolation.
+/// Retries a read-only request while the server still looks like it is
+/// warming up.
 ///
-/// LSP requests like `definition`/`hover` are read-only and idempotent, so
-/// retrying the exact same request after a short backoff is safe. This is
-/// deliberately generic (any command can opt in via `is_empty`) rather than
-/// hardcoded to rust-analyzer, since the same indexing-lag class of
-/// flakiness applies to any server that does background indexing (gopls,
-/// clangd, etc.) — the caller decides what "not ready yet" looks like for
-/// its own result shape.
+/// A server that has finished `initialize` has not necessarily finished
+/// loading the project, and it signals that in two different ways:
+///
+/// - an **empty result**, which is what rust-analyzer does mid-index. This
+///   is why the retry exists at all — `rust_lang.rs`'s cross-file
+///   `definition` and hover tests flaked under concurrent-suite load while
+///   passing reliably in isolation.
+/// - an **error**, which is what gopls does: it answers hover and
+///   definition with `no package metadata for file` until its initial load
+///   completes. Reproduced live, and this used to propagate straight out
+///   as a command failure because only empty results were retried.
+///
+/// The second case is also why the daemon's readiness poll
+/// (`daemon.rs::wait_until_indexed`) is not sufficient on its own:
+/// `documentSymbol` is answered from syntax alone, so it succeeds while
+/// type information is still missing. Outline works, hover does not.
+///
+/// Retrying is safe because every request routed through here is read-only
+/// and idempotent. A genuinely failing request (an unsupported method, say)
+/// costs the full backoff before surfacing, which is the price of not
+/// string-matching server-specific error text to guess what is transient.
 async fn proxy_request_with_retry(
     client: &ManagerClient,
     project_root: &str,
@@ -199,21 +207,26 @@ async fn proxy_request_with_retry(
     params: Value,
     is_empty: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
-    let mut result = client
-        .proxy_request(project_root, Some(language), method, params.clone())
-        .await?;
-    let mut attempt = 1;
-    while is_empty(&result) && attempt <= MAX_EMPTY_RESULT_RETRIES {
+    let mut attempt = 0;
+    loop {
+        let outcome = client
+            .proxy_request(project_root, Some(language), method, params.clone())
+            .await;
+
+        let still_warming = match &outcome {
+            Ok(v) => is_empty(v),
+            Err(_) => true,
+        };
+        if !still_warming || attempt >= MAX_EMPTY_RESULT_RETRIES {
+            return outcome;
+        }
+
+        attempt += 1;
         tokio::time::sleep(std::time::Duration::from_millis(
             RETRY_BACKOFF_MS * attempt as u64,
         ))
         .await;
-        result = client
-            .proxy_request(project_root, Some(language), method, params.clone())
-            .await?;
-        attempt += 1;
     }
-    Ok(result)
 }
 
 fn is_empty_locations_result(v: &Value) -> bool {
