@@ -915,33 +915,10 @@ pub fn run_locate(file: &str, sf: ScopeFind, fmt: &OutputFormat) -> Result<()> {
     let ctx_end = ((pos.line + 3) as usize).min(lines.len().saturating_sub(1));
     let context_lines = &lines[ctx_start..=ctx_end.min(lines.len().saturating_sub(1))];
 
-    match fmt {
-        OutputFormat::Markdown => {
-            let line_num = pos.line + 1;
-            let char_num = pos.character + 1;
-            println!("Resolved: {}:{}:{}\n", abs.display(), line_num, char_num);
-            for (i, line) in context_lines.iter().enumerate() {
-                let n = ctx_start + i + 1;
-                let marker = if n as u32 == line_num {
-                    "\u{2192}"
-                } else {
-                    " "
-                };
-                println!("{marker} {:>4} \u{2502} {line}", n);
-            }
-        }
-        OutputFormat::Json => {
-            let context: Vec<_> = context_lines
-                .iter()
-                .enumerate()
-                .map(|(i, text)| json!({ "line": ctx_start + i + 1, "text": text, "isCursor": (ctx_start + i) as u32 == pos.line }))
-                .collect();
-            println!(
-                "{}",
-                json!({ "kind": "locate", "file": abs, "line": pos.line + 1, "character": pos.character, "context": context })
-            );
-        }
-    }
+    println!(
+        "{}",
+        fmt.locate(&abs, pos.line, pos.character, ctx_start, context_lines)
+    );
     Ok(())
 }
 
@@ -1038,53 +1015,16 @@ pub async fn run_search(
         &[]
     };
 
-    match fmt {
-        OutputFormat::Markdown => {
-            if page.is_empty() {
-                println!("No matches found.");
-            } else {
-                for (i, sym) in page.iter().enumerate() {
-                    // Decoded, like every other path this tool prints —
-                    // stripping the scheme by hand left `%20` in the output.
-                    let file_path = lsp::uri::to_path_string(&sym.location.uri);
-                    println!(
-                        "{}. [{}] {}  {}:{}",
-                        i + start_index + 1,
-                        symbol_kind_name(sym.kind),
-                        sym.name,
-                        file_path,
-                        sym.location.range.start.line + 1
-                    );
-                }
-            }
-            let remaining = total.saturating_sub(start_index + page.len());
-            if remaining > 0 {
-                println!(
-                    "\n[{remaining} more — use --start-index {} ]",
-                    start_index.saturating_add(max_items)
-                );
-            }
-        }
-        OutputFormat::Json => {
-            let items: Vec<_> = page
-                .iter()
-                .map(|sym| {
-                    json!({
-                        "name": sym.name,
-                        "kind": symbol_kind_name(sym.kind),
-                        "uri": lsp::uri::to_path_string(&sym.location.uri),
-                        "line": sym.location.range.start.line + 1,
-                        "containerName": sym.container_name,
-                    })
-                })
-                .collect();
-            println!(
-                "{}",
-                json!({ "kind": "search", "query": query, "items": items, "total": total, "startIndex": start_index })
-            );
-        }
-    }
-
+    println!(
+        "{}",
+        fmt.search(
+            query,
+            page,
+            total,
+            start_index,
+            start_index.saturating_add(max_items)
+        )
+    );
     Ok(())
 }
 

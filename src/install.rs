@@ -22,27 +22,67 @@ use crate::registry::default_install_dir;
 
 use crate::paths::{go_dir, packages_dir};
 
-/// Managed languages, in the same order `lsp install list` should show them.
-pub const MANAGED_LANGUAGES: &[&str] = &[
-    "typescript",
-    "python",
-    "go",
-    "rust",
-    "java",
-    "kotlin",
-    "html",
-    "css",
-    "json",
-    "cpp",
-    "lua",
-    "zig",
-    "csharp",
-    "ruby",
-    "bash",
-];
+/// How a language's server is obtained, and everything needed to do it.
+///
+/// One `Handler` per language replaces what used to be a hand-maintained
+/// `MANAGED_LANGUAGES` list plus two parallel `match` statements that had
+/// to stay in lockstep with it and with `registry::languages()`. Those four
+/// could disagree and nothing but a hand-written test would notice; now
+/// adding a language is a registry entry plus one arm here, and the
+/// compiler checks the rest.
+enum Handler {
+    /// An npm package with a Node entry point, wrapped in a shell script.
+    Npm(NpmSpec),
+    /// A GitHub release asset.
+    Release(ReleaseSpec),
+    /// Built into this binary as a sibling `lsp-<lang>-lsp`; nothing to
+    /// download.
+    Bundled(&'static str),
+    /// `go install` into an isolated GOPATH.
+    Go,
+    /// Eclipse's jdtls bundle plus a JDK-pinning wrapper script.
+    Jdtls,
+    /// `dotnet tool install`.
+    DotnetTool,
+    /// `gem install`.
+    Gem,
+}
+
+fn handler(language: &str) -> Option<Handler> {
+    Some(match language {
+        "typescript" | "python" => Handler::Npm(npm_spec(language)?),
+        "go" => Handler::Go,
+        "rust" => Handler::Release(rust_analyzer_spec()),
+        "kotlin" => Handler::Release(kotlin_spec()),
+        "cpp" => Handler::Release(clangd_spec()),
+        "lua" => Handler::Release(lua_spec()),
+        "zig" => Handler::Release(zls_spec()),
+        "java" => Handler::Jdtls,
+        "csharp" => Handler::DotnetTool,
+        "ruby" => Handler::Gem,
+        "json" => Handler::Bundled("lsp-json-lsp"),
+        "css" => Handler::Bundled("lsp-css-lsp"),
+        "html" => Handler::Bundled("lsp-html-lsp"),
+        "bash" => Handler::Bundled("lsp-bash-lsp"),
+        // deno is deliberately unmanaged: it's used if it's on PATH and
+        // never downloaded.
+        _ => return None,
+    })
+}
+
+/// Managed languages, in the order `registry::languages()` declares them —
+/// which is the order `lsp install --list` shows. Derived rather than
+/// listed, so it cannot drift from the registry or from `handler`.
+pub fn managed_languages() -> Vec<&'static str> {
+    crate::registry::languages()
+        .iter()
+        .map(|l| l.name)
+        .filter(|name| handler(name).is_some())
+        .collect()
+}
 
 fn is_managed(language: &str) -> bool {
-    MANAGED_LANGUAGES.contains(&language)
+    handler(language).is_some()
 }
 
 /// Writes a `#!/bin/sh` wrapper at `wrapper_path` that execs `node <entry> "$@"`.
@@ -74,6 +114,28 @@ fn npm_install(packages: &[&str]) -> Result<()> {
         ),
         Err(e) => bail!("failed to run npm (is it installed and on PATH?): {e}"),
     }
+}
+
+/// Version string for an installed binary at `rel` under the install
+/// directory, or `None` if it isn't there.
+///
+/// Eight `check_*_version` functions were this same three-line shape.
+fn check_installed_version(rel: PathBuf, args: &[&str]) -> Option<String> {
+    let bin = default_install_dir().join(rel);
+    if !bin.exists() {
+        return None;
+    }
+    run_binary_version(&bin, args)
+}
+
+/// Presence check for servers that have no usable `--version` (jdtls's
+/// wrapper, kotlin-language-server and lua-language-server all start their
+/// LSP loop instead of printing a version).
+fn check_installed_present(rel: PathBuf) -> Option<String> {
+    default_install_dir()
+        .join(rel)
+        .exists()
+        .then(|| "installed".to_string())
 }
 
 fn run_binary_version(bin: &Path, args: &[&str]) -> Option<String> {
@@ -318,15 +380,128 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(resp.bytes().await?.to_vec())
 }
 
-async fn install_rust_analyzer() -> Result<PathBuf> {
+// ---------------------------------------------------------------------------
+// GitHub-release installers
+//
+// rust-analyzer, kotlin-language-server, clangd, lua-language-server and zls
+// are all "fetch the latest release asset and unpack it". They differ in
+// exactly three ways — which repo, what the asset is called, and how the
+// archive is laid out — so those are data and the thirteen-step sequence
+// around them is written once. It used to be five near-identical copies of
+// ~55 lines each, which is where the divergences crept in: only one of them
+// staged extraction inside the install directory to avoid a cross-filesystem
+// rename, and only one verified the binary actually appeared.
+// ---------------------------------------------------------------------------
+
+/// How an archive lays out what it contains.
+enum Layout {
+    /// A single compressed executable. Decompressed straight to `bin_rel`.
+    SingleFile,
+    /// Unpacks with no wrapping directory. Extracted into `dir_rel` under
+    /// the install directory, replacing whatever was there; `None` means
+    /// the install directory itself, which is *not* wiped first.
+    Flat { dir_rel: Option<&'static str> },
+    /// Wraps everything in one version-stamped top-level directory (e.g.
+    /// `clangd_21.1.0/`). That directory is stripped so the registry can
+    /// reference a fixed path regardless of the installed version.
+    StripTopLevel { dir_rel: &'static str },
+}
+
+struct ReleaseSpec {
+    /// Name used in progress output.
+    display: &'static str,
+    /// GitHub `owner/repo`.
+    repo: &'static str,
+    /// Asset file name for a given release tag.
+    asset_name: fn(&str) -> Result<String>,
+    layout: Layout,
+    /// The installed executable, relative to the install directory.
+    bin_rel: fn() -> PathBuf,
+}
+
+/// Extracts `archive` according to its file extension.
+///
+/// Shelling out to the system tools rather than linking archive crates is
+/// the pre-existing tradeoff here; this just keeps the dispatch in one
+/// place instead of five.
+fn extract_archive(archive: &Path, into: &Path, filename: &str) -> Result<()> {
+    let run = |cmd: &mut Command, what: &str| -> Result<()> {
+        let output = cmd.output()?;
+        if !output.status.success() {
+            bail!("{what} failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(())
+    };
+    if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
+        run(
+            Command::new("tar")
+                .arg("-xzf")
+                .arg(archive)
+                .arg("-C")
+                .arg(into),
+            "tar -xzf",
+        )
+    } else if filename.ends_with(".tar.xz") {
+        run(
+            Command::new("tar")
+                .arg("-xJf")
+                .arg(archive)
+                .arg("-C")
+                .arg(into),
+            "tar -xJf",
+        )
+    } else if filename.ends_with(".zip") {
+        run(
+            Command::new("unzip")
+                .args(["-q", "-o"])
+                .arg(archive)
+                .arg("-d")
+                .arg(into),
+            "unzip",
+        )
+    } else {
+        bail!("Don't know how to extract {filename}")
+    }
+}
+
+/// Decompresses a single-file archive to stdout.
+fn decompress_single_file(archive: &Path, filename: &str) -> Result<Vec<u8>> {
+    let (program, args): (&str, &[&str]) = if filename.ends_with(".gz") {
+        ("gunzip", &["-c"])
+    } else if filename.ends_with(".zip") {
+        ("unzip", &["-p"])
+    } else {
+        bail!("Don't know how to decompress {filename}")
+    };
+    let output = Command::new(program).args(args).arg(archive).output()?;
+    if !output.status.success() {
+        bail!(
+            "{program} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output.stdout)
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+async fn install_from_release(spec: &ReleaseSpec) -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching rust-analyzer from GitHub Releases...");
+    println!("Fetching {} from GitHub Releases...", spec.display);
 
-    let (target, ext) = rust_analyzer_target()?;
-    let filename = format!("rust-analyzer-{target}{ext}");
-
-    let release = fetch_latest_release("rust-lang/rust-analyzer").await?;
+    let release = fetch_latest_release(spec.repo).await?;
+    let filename = (spec.asset_name)(&release.tag_name)?;
     let asset = release
         .assets
         .iter()
@@ -336,51 +511,116 @@ async fn install_rust_analyzer() -> Result<PathBuf> {
     println!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
     let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join(&filename);
-    std::fs::write(&temp_path, &bytes)?;
+    let archive = temp_dir.join(&filename);
+    std::fs::write(&archive, &bytes)?;
 
-    let dest_name = if std::env::consts::OS == "windows" {
-        "rust-analyzer.exe"
-    } else {
-        "rust-analyzer"
-    };
-    let dest = install_dir.join(dest_name);
-
-    if ext == ".gz" {
-        let output = Command::new("gunzip").arg("-c").arg(&temp_path).output()?;
-        if !output.status.success() {
-            bail!("gunzip failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        std::fs::write(&dest, &output.stdout)?;
-    } else {
-        let output = Command::new("unzip").arg("-p").arg(&temp_path).output()?;
-        if !output.status.success() {
-            bail!("unzip failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        std::fs::write(&dest, &output.stdout)?;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-    }
+    let bin = install_dir.join((spec.bin_rel)());
+    let result = unpack(spec, &archive, &filename, &install_dir, &bin);
     std::fs::remove_dir_all(&temp_dir).ok();
-    println!("\u{2713} Installed to {}", dest.display());
-    Ok(dest)
+    result?;
+
+    if !bin.exists() {
+        bail!(
+            "{} archive extracted but the binary is missing at {}",
+            spec.display,
+            bin.display()
+        );
+    }
+    make_executable(&bin)?;
+    println!("\u{2713} Installed to {}", bin.display());
+    Ok(bin)
 }
 
-fn check_rust_analyzer_version() -> Option<String> {
-    let dest_name = if std::env::consts::OS == "windows" {
+fn unpack(
+    spec: &ReleaseSpec,
+    archive: &Path,
+    filename: &str,
+    install_dir: &Path,
+    bin: &Path,
+) -> Result<()> {
+    match spec.layout {
+        Layout::SingleFile => {
+            let contents = decompress_single_file(archive, filename)?;
+            if let Some(parent) = bin.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(bin, contents)?;
+        }
+        Layout::Flat { dir_rel } => match dir_rel {
+            Some(rel) => {
+                // Replace wholesale, so an update can't leave stale files
+                // from the previous version behind.
+                let dest = install_dir.join(rel);
+                if dest.exists() {
+                    std::fs::remove_dir_all(&dest)?;
+                }
+                std::fs::create_dir_all(&dest)?;
+                extract_archive(archive, &dest, filename)?;
+            }
+            // Straight into the install directory, which holds every other
+            // server too and must not be cleared.
+            None => extract_archive(archive, install_dir, filename)?,
+        },
+        Layout::StripTopLevel { dir_rel } => {
+            // Staged inside `install_dir`, not the system temp dir, so the
+            // rename below stays on one filesystem — renaming across them
+            // (a tmpfs /tmp vs. ~/.lsp-cli on another mount) fails with
+            // EXDEV, reproduced live.
+            let staging = install_dir.join(format!(".{dir_rel}-extract"));
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging)?;
+            }
+            std::fs::create_dir_all(&staging)?;
+            let extracted = extract_archive(archive, &staging, filename);
+            let unpacked = extracted.and_then(|()| {
+                std::fs::read_dir(&staging)?
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{} archive did not contain the expected top-level directory",
+                            spec.display
+                        )
+                    })
+            });
+            let unpacked = match unpacked {
+                Ok(p) => p,
+                Err(e) => {
+                    std::fs::remove_dir_all(&staging).ok();
+                    return Err(e);
+                }
+            };
+            let dest = install_dir.join(dir_rel);
+            if dest.exists() {
+                std::fs::remove_dir_all(&dest)?;
+            }
+            std::fs::rename(&unpacked, &dest)?;
+            std::fs::remove_dir_all(&staging).ok();
+        }
+    }
+    Ok(())
+}
+
+fn rust_analyzer_bin() -> PathBuf {
+    PathBuf::from(if std::env::consts::OS == "windows" {
         "rust-analyzer.exe"
     } else {
         "rust-analyzer"
-    };
-    let bin = default_install_dir().join(dest_name);
-    if !bin.exists() {
-        return None;
+    })
+}
+
+fn rust_analyzer_spec() -> ReleaseSpec {
+    ReleaseSpec {
+        display: "rust-analyzer",
+        repo: "rust-lang/rust-analyzer",
+        asset_name: |_version| {
+            let (target, ext) = rust_analyzer_target()?;
+            Ok(format!("rust-analyzer-{target}{ext}"))
+        },
+        layout: Layout::SingleFile,
+        bin_rel: rust_analyzer_bin,
     }
-    run_binary_version(&bin, &["--version"])
 }
 
 // ---------------------------------------------------------------------------
@@ -561,60 +801,18 @@ fn kotlin_server_bin(install_dir: &Path) -> PathBuf {
         .join(name)
 }
 
-async fn install_kotlin() -> Result<PathBuf> {
-    let install_dir = default_install_dir();
-    std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching kotlin-language-server from GitHub Releases...");
-
-    let filename = "server.zip";
-    let release = fetch_latest_release("fwcd/kotlin-language-server").await?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == filename)
-        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
-
-    println!("Downloading {filename}...");
-    let bytes = download_bytes(&asset.browser_download_url).await?;
-    let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join(filename);
-    std::fs::write(&temp_path, &bytes)?;
-
-    let dest = install_dir.join("kotlin");
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
+fn kotlin_spec() -> ReleaseSpec {
+    ReleaseSpec {
+        display: "kotlin-language-server",
+        repo: "fwcd/kotlin-language-server",
+        asset_name: |_version| Ok("server.zip".to_string()),
+        // The zip's own top level is `server/`, which is kept — the
+        // registry path is `kotlin/server/bin/kotlin-language-server`.
+        layout: Layout::Flat {
+            dir_rel: Some("kotlin"),
+        },
+        bin_rel: || kotlin_server_bin(Path::new("")),
     }
-    std::fs::create_dir_all(&dest)?;
-
-    let output = Command::new("unzip")
-        .args(["-q", "-o"])
-        .arg(&temp_path)
-        .arg("-d")
-        .arg(&dest)
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to unzip kotlin-language-server: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let server_bin = kotlin_server_bin(&install_dir);
-    if server_bin.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&server_bin, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
-    std::fs::remove_dir_all(&temp_dir).ok();
-    println!("\u{2713} Installed to {}", server_bin.display());
-    Ok(server_bin)
-}
-
-fn check_kotlin_version() -> Option<String> {
-    let bin = kotlin_server_bin(&default_install_dir());
-    bin.exists().then(|| "installed".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -634,87 +832,15 @@ fn clangd_server_bin() -> PathBuf {
     PathBuf::from("clangd").join("bin").join("clangd")
 }
 
-async fn install_clangd() -> Result<PathBuf> {
-    let install_dir = default_install_dir();
-    std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching clangd from GitHub Releases...");
-
-    let release = fetch_latest_release("clangd/clangd").await?;
-    let version = release.tag_name.clone();
-    let filename = clangd_asset_name(&version)?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == filename)
-        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
-
-    println!("Downloading {filename}...");
-    let bytes = download_bytes(&asset.browser_download_url).await?;
-    let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join(&filename);
-    std::fs::write(&temp_path, &bytes)?;
-
-    // Extracted under `install_dir` itself (not the system temp dir) so
-    // the final `rename` below stays on one filesystem — renaming across
-    // filesystems (e.g. a tmpfs `/tmp` vs. `~/.lsp-cli` on a different
-    // mount) fails with `EXDEV`, reproduced live during review.
-    let extract_dir = install_dir.join(".clangd-extract");
-    if extract_dir.exists() {
-        std::fs::remove_dir_all(&extract_dir)?;
+fn clangd_spec() -> ReleaseSpec {
+    ReleaseSpec {
+        display: "clangd",
+        repo: "clangd/clangd",
+        asset_name: clangd_asset_name,
+        // The zip wraps everything in `clangd_<version>/`.
+        layout: Layout::StripTopLevel { dir_rel: "clangd" },
+        bin_rel: clangd_server_bin,
     }
-    std::fs::create_dir_all(&extract_dir)?;
-    let output = Command::new("unzip")
-        .args(["-q", "-o"])
-        .arg(&temp_path)
-        .arg("-d")
-        .arg(&extract_dir)
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to unzip clangd: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    std::fs::remove_dir_all(&temp_dir).ok();
-
-    // The zip wraps everything in a version-stamped `clangd_<version>/`
-    // directory; strip that so the registry can reference a fixed
-    // `clangd/bin/clangd` path regardless of installed version.
-    let unpacked = std::fs::read_dir(&extract_dir)?
-        .filter_map(|e| e.ok())
-        .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .ok_or_else(|| anyhow!("clangd archive did not contain the expected top-level directory"))?
-        .path();
-
-    let dest = install_dir.join("clangd");
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
-    }
-    std::fs::rename(&unpacked, &dest)?;
-    std::fs::remove_dir_all(&extract_dir).ok();
-
-    let bin = install_dir.join(clangd_server_bin());
-    if !bin.exists() {
-        bail!(
-            "clangd archive extracted but binary is missing at {}",
-            bin.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
-    }
-    println!("\u{2713} Installed to {}", bin.display());
-    Ok(bin)
-}
-
-fn check_clangd_version() -> Option<String> {
-    let bin = default_install_dir().join(clangd_server_bin());
-    if !bin.exists() {
-        return None;
-    }
-    run_binary_version(&bin, &["--version"])
 }
 
 // ---------------------------------------------------------------------------
@@ -737,64 +863,16 @@ fn lua_language_server_bin() -> PathBuf {
     PathBuf::from("lua").join("bin").join("lua-language-server")
 }
 
-async fn install_lua_language_server() -> Result<PathBuf> {
-    let install_dir = default_install_dir();
-    std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching lua-language-server from GitHub Releases...");
-
-    let release = fetch_latest_release("LuaLS/lua-language-server").await?;
-    let version = release.tag_name.clone();
-    let filename = lua_language_server_asset_name(&version)?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == filename)
-        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
-
-    println!("Downloading {filename}...");
-    let bytes = download_bytes(&asset.browser_download_url).await?;
-    let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join(&filename);
-    std::fs::write(&temp_path, &bytes)?;
-
-    let dest = install_dir.join("lua");
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
+fn lua_spec() -> ReleaseSpec {
+    ReleaseSpec {
+        display: "lua-language-server",
+        repo: "LuaLS/lua-language-server",
+        asset_name: lua_language_server_asset_name,
+        layout: Layout::Flat {
+            dir_rel: Some("lua"),
+        },
+        bin_rel: lua_language_server_bin,
     }
-    std::fs::create_dir_all(&dest)?;
-    let output = Command::new("tar")
-        .arg("-xzf")
-        .arg(&temp_path)
-        .arg("-C")
-        .arg(&dest)
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to extract lua-language-server: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    std::fs::remove_dir_all(&temp_dir).ok();
-
-    let bin = install_dir.join(lua_language_server_bin());
-    if !bin.exists() {
-        bail!(
-            "lua-language-server archive extracted but binary is missing at {}",
-            bin.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
-    }
-    println!("\u{2713} Installed to {}", bin.display());
-    Ok(bin)
-}
-
-fn check_lua_language_server_version() -> Option<String> {
-    let bin = default_install_dir().join(lua_language_server_bin());
-    bin.exists().then(|| "installed".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -812,61 +890,16 @@ fn zls_asset_name() -> Result<&'static str> {
     }
 }
 
-async fn install_zls() -> Result<PathBuf> {
-    let install_dir = default_install_dir();
-    std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching zls from GitHub Releases...");
-
-    let filename = zls_asset_name()?;
-    let release = fetch_latest_release("zigtools/zls").await?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == filename)
-        .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
-
-    println!("Downloading {filename}...");
-    let bytes = download_bytes(&asset.browser_download_url).await?;
-    let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join(filename);
-    std::fs::write(&temp_path, &bytes)?;
-
-    let output = Command::new("tar")
-        .arg("-xJf")
-        .arg(&temp_path)
-        .arg("-C")
-        .arg(&install_dir)
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to extract zls: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+fn zls_spec() -> ReleaseSpec {
+    ReleaseSpec {
+        display: "zls",
+        repo: "zigtools/zls",
+        asset_name: |_version| zls_asset_name().map(|s| s.to_string()),
+        // Unpacks flat, straight into the install directory alongside every
+        // other server, so nothing is cleared first.
+        layout: Layout::Flat { dir_rel: None },
+        bin_rel: || PathBuf::from("zls"),
     }
-    std::fs::remove_dir_all(&temp_dir).ok();
-
-    let bin = install_dir.join("zls");
-    if !bin.exists() {
-        bail!(
-            "zls archive extracted but binary is missing at {}",
-            bin.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
-    }
-    println!("\u{2713} Installed to {}", bin.display());
-    Ok(bin)
-}
-
-fn check_zls_version() -> Option<String> {
-    let bin = default_install_dir().join("zls");
-    if !bin.exists() {
-        return None;
-    }
-    run_binary_version(&bin, &["--version"])
 }
 
 // ---------------------------------------------------------------------------
@@ -909,14 +942,6 @@ fn install_csharp_ls() -> Result<PathBuf> {
     Ok(bin)
 }
 
-fn check_csharp_ls_version() -> Option<String> {
-    let bin = default_install_dir().join("csharp-ls");
-    if !bin.exists() {
-        return None;
-    }
-    run_binary_version(&bin, &["--version"])
-}
-
 fn install_ruby_lsp() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
@@ -939,14 +964,6 @@ fn install_ruby_lsp() -> Result<PathBuf> {
     }
     println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
-}
-
-fn check_ruby_lsp_version() -> Option<String> {
-    let bin = default_install_dir().join("ruby-lsp");
-    if !bin.exists() {
-        return None;
-    }
-    run_binary_version(&bin, &["--version"])
 }
 
 // ---------------------------------------------------------------------------
@@ -984,49 +1001,37 @@ fn install_bundled_server(bin_name: &str) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 async fn install_language(language: &str) -> Result<PathBuf> {
-    if let Some(spec) = npm_spec(language) {
-        return install_npm(&spec);
-    }
-    match language {
-        "go" => install_go(),
-        "rust" => install_rust_analyzer().await,
-        "java" => install_jdtls().await,
-        "kotlin" => install_kotlin().await,
-        "cpp" => install_clangd().await,
-        "lua" => install_lua_language_server().await,
-        "zig" => install_zls().await,
-        "csharp" => install_csharp_ls(),
-        "ruby" => install_ruby_lsp(),
-        "json" => install_bundled_server("lsp-json-lsp"),
-        "css" => install_bundled_server("lsp-css-lsp"),
-        "html" => install_bundled_server("lsp-html-lsp"),
-        "bash" => install_bundled_server("lsp-bash-lsp"),
-        other => bail!(
-            "Unknown language: {other}\nSupported: {}",
-            MANAGED_LANGUAGES.join(", ")
-        ),
+    let Some(handler) = handler(language) else {
+        bail!(
+            "Unknown language: {language}\nSupported: {}",
+            managed_languages().join(", ")
+        );
+    };
+    match handler {
+        Handler::Npm(spec) => install_npm(&spec),
+        Handler::Release(spec) => install_from_release(&spec).await,
+        Handler::Bundled(bin) => install_bundled_server(bin),
+        Handler::Go => install_go(),
+        Handler::Jdtls => install_jdtls().await,
+        Handler::DotnetTool => install_csharp_ls(),
+        Handler::Gem => install_ruby_lsp(),
     }
 }
 
 fn check_version(language: &str) -> Option<String> {
-    if let Some(spec) = npm_spec(language) {
-        return check_npm_version(&spec);
-    }
-    match language {
-        "go" => check_go_version(),
-        "rust" => check_rust_analyzer_version(),
-        "java" => check_jdtls_version(),
-        "kotlin" => check_kotlin_version(),
-        "cpp" => check_clangd_version(),
-        "lua" => check_lua_language_server_version(),
-        "zig" => check_zls_version(),
-        "csharp" => check_csharp_ls_version(),
-        "ruby" => check_ruby_lsp_version(),
-        "json" => check_bundled_server_version("lsp-json-lsp"),
-        "css" => check_bundled_server_version("lsp-css-lsp"),
-        "html" => check_bundled_server_version("lsp-html-lsp"),
-        "bash" => check_bundled_server_version("lsp-bash-lsp"),
-        _ => None,
+    match handler(language)? {
+        Handler::Npm(spec) => check_npm_version(&spec),
+        // Every release-installed server reports a version except the two
+        // JVM-ish ones, which start their LSP loop instead of printing one.
+        Handler::Release(spec) => match language {
+            "kotlin" | "lua" => check_installed_present((spec.bin_rel)()),
+            _ => check_installed_version((spec.bin_rel)(), &["--version"]),
+        },
+        Handler::Bundled(bin) => check_bundled_server_version(bin),
+        Handler::Go => check_go_version(),
+        Handler::Jdtls => check_jdtls_version(),
+        Handler::DotnetTool => check_installed_version(PathBuf::from("csharp-ls"), &["--version"]),
+        Handler::Gem => check_installed_version(PathBuf::from("ruby-lsp"), &["--version"]),
     }
 }
 
@@ -1034,7 +1039,7 @@ pub async fn run_install(language: &str, update: bool) -> Result<()> {
     if language == "all" {
         println!("Installing all supported language servers...");
         let mut had_failure = false;
-        for lang in MANAGED_LANGUAGES {
+        for lang in managed_languages() {
             println!("\n--- {lang} ---");
             if let Err(e) = Box::pin(run_install(lang, update)).await {
                 eprintln!("\nFailed to install {lang}: {e}");
@@ -1050,7 +1055,7 @@ pub async fn run_install(language: &str, update: bool) -> Result<()> {
     if !is_managed(language) {
         bail!(
             "Unknown language: {language}\nSupported: {}",
-            MANAGED_LANGUAGES.join(", ")
+            managed_languages().join(", ")
         );
     }
 
@@ -1210,31 +1215,47 @@ mod tests {
     }
 
     #[test]
-    fn managed_languages_all_have_an_install_path() {
-        // Every entry in MANAGED_LANGUAGES must resolve to either an npm
-        // spec or one of the explicit go/rust/kotlin arms in
-        // install_language/check_version — otherwise `lsp install <lang>`
-        // would claim to support a language it can't actually install.
-        for lang in MANAGED_LANGUAGES {
-            let has_npm_spec = npm_spec(lang).is_some();
-            let has_explicit_arm = matches!(
-                *lang,
-                "go" | "rust"
-                    | "java"
-                    | "kotlin"
-                    | "cpp"
-                    | "lua"
-                    | "zig"
-                    | "csharp"
-                    | "ruby"
-                    | "json"
-                    | "css"
-                    | "html"
-                    | "bash"
+    fn every_registry_language_is_either_installable_or_deliberately_not() {
+        // The registry is the source of truth for what languages exist.
+        // Anything in it without a `handler` is unmanaged, and `deno` is
+        // the only one that is meant to be — it's used from PATH and never
+        // downloaded. A new registry entry with no install path would
+        // otherwise be silently unusable.
+        for lang in crate::registry::languages() {
+            let managed = handler(lang.name).is_some();
+            assert_eq!(
+                managed,
+                lang.name != "deno",
+                "`{}` should {} have an install path",
+                lang.name,
+                if lang.name == "deno" { "not" } else { "" }
             );
+        }
+    }
+
+    #[test]
+    fn managed_languages_is_derived_from_the_registry() {
+        // It used to be a hand-written list that could drift from both the
+        // registry and the install dispatch.
+        let managed = managed_languages();
+        assert!(!managed.contains(&"deno"));
+        for name in &managed {
             assert!(
-                has_npm_spec || has_explicit_arm,
-                "managed language `{lang}` has no install path wired up"
+                crate::registry::languages().iter().any(|l| l.name == *name),
+                "`{name}` is not a registry language"
+            );
+        }
+        assert_eq!(managed.len(), crate::registry::languages().len() - 1);
+    }
+
+    #[test]
+    fn every_managed_language_reports_a_version_path() {
+        // `check_version` returning None for an installed server would make
+        // `ensure_installed` reinstall it on every single command.
+        for lang in managed_languages() {
+            assert!(
+                handler(lang).is_some(),
+                "managed language `{lang}` has no handler"
             );
         }
     }
@@ -1244,7 +1265,7 @@ mod tests {
         // Two languages accidentally sharing a wrapper_name would silently
         // clobber each other's installed server on disk.
         let mut seen = std::collections::HashSet::new();
-        for lang in MANAGED_LANGUAGES {
+        for lang in managed_languages() {
             if let Some(spec) = npm_spec(lang) {
                 assert!(
                     seen.insert(spec.wrapper_name),

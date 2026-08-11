@@ -1,6 +1,6 @@
 use crate::protocol::{
     symbol_kind_name, CallHierarchyItem, Diagnostic, DocumentSymbol, HoverResult, Location,
-    TextEdit, TypeHierarchyItem,
+    SymbolInformation, TextEdit, TypeHierarchyItem,
 };
 use serde_json::json;
 
@@ -295,6 +295,111 @@ impl OutputFormat {
     /// nonzero count here means the rename is incomplete even when
     /// `applied` is true, and callers must be told that explicitly rather
     /// than have it look like a clean success.
+    /// A resolved `--scope`/`--find` position with surrounding context.
+    ///
+    /// `run_locate` rendered this inline, as did `search` — the only two of
+    /// the twelve commands that did not go through this type, which is why
+    /// `format.rs` had no test covering either of them.
+    pub fn locate(
+        &self,
+        file: &std::path::Path,
+        line: u32,
+        character: u32,
+        context_start_line: usize,
+        context: &[&str],
+    ) -> String {
+        match self {
+            OutputFormat::Json => json!({
+                "kind": "locate",
+                "file": file,
+                "line": line + 1,
+                "character": character,
+                "context": context.iter().enumerate().map(|(i, text)| json!({
+                    "line": context_start_line + i + 1,
+                    "text": text,
+                    "isCursor": (context_start_line + i) as u32 == line,
+                })).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            OutputFormat::Markdown => {
+                let line_num = line + 1;
+                let mut out = format!(
+                    "Resolved: {}:{}:{}\n",
+                    file.display(),
+                    line_num,
+                    character + 1
+                );
+                for (i, text) in context.iter().enumerate() {
+                    let n = context_start_line + i + 1;
+                    let marker = if n as u32 == line_num {
+                        "\u{2192}"
+                    } else {
+                        " "
+                    };
+                    out.push_str(&format!("\n{marker} {n:>4} \u{2502} {text}"));
+                }
+                out
+            }
+        }
+    }
+
+    /// One page of workspace symbol results.
+    ///
+    /// `total` and `start_index` are reported in JSON so a caller can tell
+    /// whether more results exist without comparing counts by hand.
+    pub fn search(
+        &self,
+        query: &str,
+        page: &[SymbolInformation],
+        total: usize,
+        start_index: usize,
+        next_start_index: usize,
+    ) -> String {
+        match self {
+            OutputFormat::Json => json!({
+                "kind": "search",
+                "query": query,
+                "items": page.iter().map(|sym| json!({
+                    "name": sym.name,
+                    "kind": symbol_kind_name(sym.kind),
+                    "uri": uri_to_path(&sym.location.uri),
+                    "line": sym.location.range.start.line + 1,
+                    "containerName": sym.container_name,
+                })).collect::<Vec<_>>(),
+                "total": total,
+                "startIndex": start_index,
+            })
+            .to_string(),
+            OutputFormat::Markdown => {
+                if page.is_empty() {
+                    return "No matches found.".to_string();
+                }
+                let mut out = page
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sym)| {
+                        format!(
+                            "{}. [{}] {}  {}:{}",
+                            i + start_index + 1,
+                            symbol_kind_name(sym.kind),
+                            sym.name,
+                            uri_to_path(&sym.location.uri),
+                            sym.location.range.start.line + 1
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let remaining = total.saturating_sub(start_index + page.len());
+                if remaining > 0 {
+                    out.push_str(&format!(
+                        "\n\n[{remaining} more — use --start-index {next_start_index} ]"
+                    ));
+                }
+                out
+            }
+        }
+    }
+
     pub fn rename(
         &self,
         new_name: &str,
@@ -491,6 +596,109 @@ mod tests {
         assert!(
             out.contains("/my project/a.rs"),
             "expected a decoded path, got: {out}"
+        );
+    }
+
+    // --- locate / search ----------------------------------------------
+    // Both used to render inline in commands.rs, which is why neither had
+    // a test here.
+
+    #[test]
+    fn json_locate_reports_one_based_lines_and_marks_the_cursor_row() {
+        let out = OutputFormat::Json.locate(
+            std::path::Path::new("/a/b.ts"),
+            /* line (0-based) */ 4,
+            /* character */ 6,
+            /* context starts at 0-based line */ 3,
+            &["three", "four", "five"],
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["kind"], "locate");
+        assert_eq!(v["line"], 5, "line should be 1-based");
+        assert_eq!(v["character"], 6, "character stays 0-based, as LSP has it");
+        assert_eq!(v["context"][0]["line"], 4);
+        assert_eq!(v["context"][0]["isCursor"], false);
+        assert_eq!(v["context"][1]["isCursor"], true);
+        assert_eq!(v["context"][2]["isCursor"], false);
+    }
+
+    #[test]
+    fn markdown_locate_points_an_arrow_at_the_resolved_line() {
+        let out = OutputFormat::Markdown.locate(
+            std::path::Path::new("/a/b.ts"),
+            4,
+            6,
+            3,
+            &["three", "four", "five"],
+        );
+        assert!(out.starts_with("Resolved: /a/b.ts:5:7"));
+        let arrow_line = out
+            .lines()
+            .find(|l| l.starts_with('\u{2192}'))
+            .expect("expected a marked line");
+        assert!(
+            arrow_line.contains("four"),
+            "arrow on the wrong row: {arrow_line}"
+        );
+    }
+
+    fn symbol(name: &str, line: u32) -> SymbolInformation {
+        SymbolInformation {
+            name: name.to_string(),
+            kind: crate::protocol::symbol_kind::CLASS,
+            location: Location {
+                uri: "file:///my%20project/a.ts".into(),
+                range: Range {
+                    start: Position { line, character: 0 },
+                    end: Position { line, character: 5 },
+                },
+            },
+            container_name: None,
+        }
+    }
+
+    #[test]
+    fn json_search_reports_total_and_start_index() {
+        // These are what let a caller detect truncation without counting.
+        let page = vec![symbol("User", 3)];
+        let out = OutputFormat::Json.search("User", &page, 42, 20, 40);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["kind"], "search");
+        assert_eq!(v["query"], "User");
+        assert_eq!(v["total"], 42);
+        assert_eq!(v["startIndex"], 20);
+        assert_eq!(v["items"][0]["name"], "User");
+        assert_eq!(v["items"][0]["kind"], "class");
+        assert_eq!(v["items"][0]["line"], 4);
+    }
+
+    #[test]
+    fn search_paths_are_percent_decoded() {
+        let out = OutputFormat::Json.search("User", &[symbol("User", 0)], 1, 0, 20);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["items"][0]["uri"], "/my project/a.ts");
+    }
+
+    #[test]
+    fn markdown_search_numbers_results_from_the_page_offset() {
+        let page = vec![symbol("A", 0), symbol("B", 1)];
+        let out = OutputFormat::Markdown.search("q", &page, 2, 20, 40);
+        assert!(out.starts_with("21. [class] A"), "got: {out}");
+        assert!(out.contains("22. [class] B"));
+    }
+
+    #[test]
+    fn markdown_search_says_when_more_results_remain() {
+        let out = OutputFormat::Markdown.search("q", &[symbol("A", 0)], 10, 0, 20);
+        assert!(out.contains("9 more"), "got: {out}");
+        assert!(out.contains("--start-index 20"));
+    }
+
+    #[test]
+    fn markdown_search_with_no_results_says_so() {
+        assert_eq!(
+            OutputFormat::Markdown.search("q", &[], 0, 0, 20),
+            "No matches found."
         );
     }
 }
