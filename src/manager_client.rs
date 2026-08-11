@@ -76,6 +76,13 @@ impl ManagerClient {
             return Ok(());
         }
 
+        // Checked before spawning rather than after waiting: an unbindable
+        // socket path makes the daemon exit immediately, which the wait
+        // loop below can only report as a timeout.
+        if let Err(e) = crate::paths::check_socket_path(&socket_path()) {
+            bail!("cannot start the lsp-cli daemon: {e}");
+        }
+
         let lock_path = spawn_lock_path();
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -126,12 +133,28 @@ impl ManagerClient {
             return Ok(());
         }
 
+        // Keep the daemon's stderr, rather than discarding it. It is
+        // spawned detached, so anything it says about failing to start had
+        // nowhere to go — while the timeout message below told the user to
+        // go and read a log that was never written.
+        let log_path = crate::paths::daemon_log_path();
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path);
+
         let exe = std::env::current_exe()?;
         std::process::Command::new(exe)
             .arg("--daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(match log {
+                Ok(f) => std::process::Stdio::from(f),
+                Err(_) => std::process::Stdio::null(),
+            })
             .spawn()
             .map_err(|e| anyhow!("failed to spawn daemon: {e}"))?;
 
@@ -154,7 +177,7 @@ impl ManagerClient {
         bail!(
             "lsp-cli daemon failed to start within {}s (managerTimeout). Check {} for errors.",
             timeout.as_secs(),
-            crate::paths::lsp_cli_home().join("logs").display()
+            crate::paths::daemon_log_path().display()
         );
     }
 

@@ -29,6 +29,19 @@ fn bin_path() -> PathBuf {
 /// (which is what most of them want — a warm server is expensive to start),
 /// but no two binaries can disturb each other. Tests that specifically need
 /// to shut the daemon down use [`isolated_home`] for a home of their own.
+/// Root for test state directories.
+///
+/// Not `std::env::temp_dir()`: on macOS that is a ~49-byte
+/// `/var/folders/<...>/T/` path, and a Unix domain socket path has a hard
+/// 104-byte limit there (`sockaddr_un.sun_path`). A state directory under
+/// it overflowed the limit, the daemon's `bind` failed, and every test in
+/// the binary spent the full `managerTimeout` before reporting a startup
+/// timeout — which is exactly what CI caught on macos-latest. `/tmp` is
+/// five bytes and always present on the platforms this tool supports.
+fn temp_root() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
 fn shared_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -48,7 +61,10 @@ fn shared_home() -> &'static Path {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("lsp-cli-test-{name}-{build}"));
+        // Short by construction, for the socket-path limit above: the
+        // binary name is already unique per test binary, and the build
+        // stamp only needs enough entropy to change when `lsp` is rebuilt.
+        let dir = temp_root().join(format!("lsp-t-{name}-{:x}", build));
         prepare_home(&dir);
         dir
     })
@@ -100,8 +116,8 @@ impl Drop for IsolatedHome {
 }
 
 pub fn isolated_home(label: &str) -> IsolatedHome {
-    let dir = std::env::temp_dir().join(format!(
-        "lsp-cli-test-{label}-{}-{}",
+    let dir = temp_root().join(format!(
+        "lsp-i-{label}-{}-{}",
         std::process::id(),
         // Distinguishes concurrent tests in the same process without
         // needing a random source.

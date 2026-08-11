@@ -863,6 +863,13 @@ pub async fn start_daemon() -> Result<()> {
         }
     }
 
+    if let Err(e) = crate::paths::check_socket_path(&path) {
+        // Also checked CLI-side before spawning; repeated here because the
+        // daemon can be started directly with `lsp --daemon`.
+        eprintln!("[daemon] cannot bind: {e}");
+        anyhow::bail!("{e}");
+    }
+
     if tokio::net::UnixStream::connect(&path).await.is_ok() {
         // Another daemon is alive and already serving this socket — do not
         // touch it or bind our own listener. Exit quietly; the caller's
