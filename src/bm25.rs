@@ -116,13 +116,15 @@ fn re(pattern: &str) -> regex::Regex {
     regex::Regex::new(pattern).unwrap()
 }
 
-/// Words the declaration-shaped patterns can capture but that are never a
-/// symbol's name: `if (x) {` looks exactly like a method `if()` to a
-/// pattern for TS/Java/C++/C# method shorthand, and was indexed as one.
+/// Control-flow keywords the method-shaped patterns can capture: `if (x) {`
+/// looks exactly like a method `if()` to a pattern for TS/Java/C++/C#
+/// method shorthand, and was indexed as one. Only words that are keywords
+/// in every language this covers: `new`, `delete`, `match`, `select` and
+/// the like are ordinary method names somewhere (`fn new`, Django's
+/// `def delete`).
 const NOT_A_NAME: &[&str] = &[
-    "if", "else", "for", "foreach", "while", "do", "switch", "case", "catch", "try", "finally",
-    "return", "throw", "new", "delete", "typeof", "sizeof", "await", "yield", "with", "using",
-    "lock", "fixed", "when", "match", "select", "function", "class", "struct",
+    "if", "else", "for", "foreach", "while", "switch", "catch", "return", "throw", "typeof",
+    "sizeof",
 ];
 
 fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
@@ -318,7 +320,11 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
         for (re, kind) in patterns {
             if let Some(caps) = re.captures(line) {
                 if let Some(m) = caps.get(1) {
-                    if NOT_A_NAME.contains(&m.as_str()) {
+                    // `return new Runnable() {` is an expression, not a
+                    // method called `Runnable`.
+                    if NOT_A_NAME.contains(&m.as_str())
+                        || line[..m.start()].trim_end().ends_with("new")
+                    {
                         continue;
                     }
                     let name = m.as_str().to_string();
@@ -868,6 +874,32 @@ let counter: number = 0;
                 ("counter", "variable"),
             ])
         );
+    }
+
+    #[test]
+    fn ordinary_names_that_are_keywords_elsewhere_are_still_found() {
+        let rs = "impl Foo {\n    pub fn new() -> Self { Foo }\n    fn lock(&self) {}\n    fn select(&self) {}\n}\n";
+        let found = extracted("a.rs", rs);
+        for name in ["new", "lock", "select"] {
+            assert!(
+                found.contains(&(name.into(), "function")),
+                "{name}: {found:?}"
+            );
+        }
+        let py = "class Model:\n    def delete(self):\n        pass\n    def using(self, db):\n        pass\n";
+        let found = extracted("a.py", py);
+        assert!(found.contains(&("delete".into(), "function")), "{found:?}");
+        assert!(found.contains(&("using".into(), "function")), "{found:?}");
+        let ts = "class Repo {\n  async delete(id: string): Promise<void> {\n  }\n}\n";
+        assert!(extracted("a.ts", ts).contains(&("delete".into(), "method")));
+    }
+
+    #[test]
+    fn an_anonymous_class_expression_is_not_a_method() {
+        let java = "class A {\n    Runnable r() {\n        return new Runnable() {\n        };\n    }\n}\n";
+        let found = extracted("A.java", java);
+        assert!(!found.iter().any(|(n, _)| n == "Runnable"), "{found:?}");
+        assert!(found.contains(&("r".into(), "method")), "{found:?}");
     }
 
     #[test]

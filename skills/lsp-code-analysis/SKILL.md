@@ -90,7 +90,9 @@ are one symbol, and resolve to the first.
 
 `--find <text>` narrows to an exact position inside that scope. It
 ignores whitespace differences, and `<|>` marks where the cursor should
-sit:
+sit. When the text occurs more than once, a whole word in code wins over
+part of a longer word, and both over a mention in a comment or docstring;
+then the earliest:
 
 ```bash
 lsp definition src/service.ts --scope 12 --find "<|>User"

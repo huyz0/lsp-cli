@@ -377,9 +377,11 @@ impl Manager {
             if c.notify(method, params.clone()).await.is_err() {
                 continue;
             }
-            // Files changed outside the server's open documents: any
-            // diagnostics it has published may now be out of date.
-            c.mark_external_change();
+            // A file reloaded into the server counts as a document change
+            // (`reload_from_disk` records it), so the next `diagnostics`
+            // waits for the server to re-check. A change in nothing the
+            // server reloads — another language, too large a batch — doesn't
+            // make every later diagnostics call wait.
             if method == "workspace/didChangeWatchedFiles" {
                 reload_changed_files(&mut c, &language, &params).await;
             }
@@ -755,19 +757,13 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// How long a freshly spawned server is given to finish its initial index,
-/// and how often readiness is probed while waiting.
-///
-/// There is no portable "indexing finished" notification in LSP, so this
-/// polls for the thing callers actually need: `documentSymbol` on the file
-/// that triggered the spawn returning something. Servers differ by an order
-/// of magnitude here — typescript-language-server answers almost at once,
-/// gopls reports `no package metadata` until its initial load completes,
-/// rust-analyzer takes longer still — so waiting for the observed condition
-/// beats any constant large enough for the slowest of them.
 /// Most changed files `reload_changed_files` will reopen in one batch.
 /// Beyond that (a branch switch, a code generator) the notification alone
 /// has to do.
+///
+/// Deletions aren't reloaded: there is nothing to open. A server that
+/// ignores `didChangeWatchedFiles` (typescript-language-server) notices a
+/// deleted, never-opened file on its own schedule, a few seconds later.
 const MAX_RELOADS_PER_BATCH: usize = 20;
 
 /// Makes the server re-read files that changed on disk but that it doesn't
@@ -824,6 +820,16 @@ const PUSH_DIAGNOSTICS_REPUBLISH_WAIT: std::time::Duration = std::time::Duration
 /// set is taken as final. See `diagnostic_with_push_fallback`.
 const PUSH_DIAGNOSTICS_QUIET: std::time::Duration = std::time::Duration::from_millis(750);
 
+/// How long a freshly spawned server is given to finish its initial index,
+/// and how often readiness is probed while waiting.
+///
+/// There is no portable "indexing finished" notification in LSP, so this
+/// polls for the thing callers actually need: `documentSymbol` on the file
+/// that triggered the spawn returning something. Servers differ by an order
+/// of magnitude here — typescript-language-server answers almost at once,
+/// gopls reports `no package metadata` until its initial load completes,
+/// rust-analyzer takes longer still — so waiting for the observed condition
+/// beats any constant large enough for the slowest of them.
 const INDEX_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const INDEX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 

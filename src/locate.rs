@@ -200,11 +200,19 @@ fn associated_blocks(name: &str, lines: &[&str]) -> Vec<(usize, usize)> {
 /// not a declaration.
 fn code_part(line: &str) -> &str {
     let trimmed = line.trim_start();
+    // `#` and `*` lead a comment only when followed by a space (or nothing,
+    // or `!` for a shebang): `#define`, `#include`, Rust's `#[derive]` and
+    // `*p = x;` are code.
+    let leads_comment = |marker: char| {
+        trimmed.strip_prefix(marker).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with([' ', '\t', '!', '/']) || rest.starts_with(marker)
+        })
+    };
     if trimmed.starts_with("//")
-        || trimmed.starts_with('#')
         || trimmed.starts_with("--")
         || trimmed.starts_with("/*")
-        || trimmed.starts_with('*')
+        || leads_comment('#')
+        || leads_comment('*')
     {
         return "";
     }
@@ -217,6 +225,9 @@ fn code_part(line: &str) -> &str {
             Some(q) if b == q && (i == 0 || bytes[i - 1] != b'\\') => in_string = None,
             Some(_) => {}
             None if b == b'"' || b == b'`' => in_string = Some(b),
+            // A single quote opens a string only with a closing one later on
+            // the line, so a Rust lifetime (`&'a str`) doesn't.
+            None if b == b'\'' && bytes[i + 1..].contains(&b'\'') => in_string = Some(b),
             None if b == b'/' && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
             None => {}
         }
@@ -493,10 +504,15 @@ fn resolve_position(
     // Preferred: a whole identifier in code, then a partial word in code,
     // then anything in a comment; earlier lines first within a tier.
     let mut best: Option<(u8, usize, usize)> = None;
+    let docstrings = docstring_lines(lines);
     for i in start_line..=end_line.min(lines.len().saturating_sub(1)) {
         let line = lines.get(i).copied().unwrap_or("");
         let normalized_line = normalize_whitespace(line);
-        let code_len = normalize_whitespace(code_part(line)).len();
+        let code_len = if docstrings.contains(&i) {
+            0
+        } else {
+            normalize_whitespace(code_part(line)).len()
+        };
         for (at, _) in normalized_line.match_indices(normalized_pattern.as_str()) {
             let in_code = at < code_len;
             let whole = is_whole_word(&normalized_line, at, normalized_pattern.len());
@@ -530,6 +546,46 @@ fn resolve_position(
         end_line + 1,
         find
     );
+}
+
+/// Lines inside (or opening/closing) a triple-quoted string — Python
+/// docstrings above all — which `--find` should treat like comments.
+fn docstring_lines(lines: &[&str]) -> std::collections::HashSet<usize> {
+    let mut inside: Option<&str> = None;
+    let mut out = std::collections::HashSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let mut rest = *line;
+        let mut touched = inside.is_some();
+        loop {
+            match inside {
+                Some(q) => match rest.find(q) {
+                    Some(at) => {
+                        rest = &rest[at + q.len()..];
+                        inside = None;
+                    }
+                    None => break,
+                },
+                None => {
+                    let next = ["\"\"\"", "\u{27}\u{27}\u{27}"]
+                        .into_iter()
+                        .filter_map(|q| rest.find(q).map(|at| (at, q)))
+                        .min();
+                    match next {
+                        Some((at, q)) => {
+                            touched = true;
+                            rest = &rest[at + q.len()..];
+                            inside = Some(q);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        if touched {
+            out.insert(i);
+        }
+    }
+    out
 }
 
 /// Whether the `len` bytes at `at` in `text` stand alone as a word: not
@@ -780,6 +836,38 @@ mod tests {
         let content = "function f(options: UserOptions): User {}\n";
         let pos = resolve_locate(content, None, Some(": <|>User")).unwrap();
         assert_eq!(pos.character, 34);
+    }
+
+    #[test]
+    fn a_python_docstring_counts_as_a_comment() {
+        let py = "\"\"\"Helpers for User objects.\"\"\"\n\nclass User:\n    \"\"\"\n    A User.\n    \"\"\"\n    pass\n";
+        assert_eq!(resolve_locate(py, None, Some("User")).unwrap().line, 2);
+    }
+
+    #[test]
+    fn preprocessor_attributes_and_dereferences_are_code() {
+        let c = "#define MAX_LEN 10\nint a = MAX_LEN;\n";
+        assert_eq!(resolve_locate(c, None, Some("MAX_LEN")).unwrap().line, 0);
+        let deref = "*p = compute(a);\nint compute(int a);\n";
+        assert_eq!(
+            resolve_locate(deref, None, Some("compute")).unwrap().line,
+            0
+        );
+        assert_eq!(code_part("#[derive(Debug)]"), "#[derive(Debug)]");
+        assert_eq!(code_part("    # a comment"), "");
+        assert_eq!(code_part(" * a doc line"), "");
+    }
+
+    #[test]
+    fn a_url_in_a_single_quoted_string_does_not_end_the_code() {
+        let js = "const u = 'http://x'; const User = 1;\nconst UserX = 2;\n";
+        let pos = resolve_locate(js, None, Some("User")).unwrap();
+        assert_eq!((pos.line, pos.character), (0, 28));
+        // A Rust lifetime isn't a string.
+        assert_eq!(
+            code_part("fn f<'a>(x: &'a str) // c"),
+            "fn f<'a>(x: &'a str) "
+        );
     }
 
     #[test]

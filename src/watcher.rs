@@ -32,9 +32,6 @@ struct WatcherHandle {
     // channel, which ends the debounce task's `recv()` loop naturally. The
     // task itself holds a `Weak`, so it cannot keep the watcher alive.
     _watcher: Arc<Mutex<notify::RecommendedWatcher>>,
-    /// Changes seen but not yet sent, shared with the debounce task so
-    /// `take_pending` can hand them over early. See `take_pending`.
-    pending: Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
 /// How long to wait for the tree to go quiet before flushing a batch.
@@ -110,6 +107,11 @@ async fn maintain_watches(
 
 pub struct WatcherManager {
     watchers: Mutex<HashMap<String, WatcherHandle>>,
+    /// Each watched root's pending-changes buffer, kept apart from
+    /// `watchers`: `take_pending` runs before every request, and
+    /// `ensure_watching` holds `watchers` across a whole directory walk,
+    /// which would stall requests for every other project meanwhile.
+    pending: std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<Vec<Value>>>>>,
     tx: mpsc::UnboundedSender<WatchBatch>,
 }
 
@@ -117,6 +119,7 @@ impl WatcherManager {
     pub fn new(tx: mpsc::UnboundedSender<WatchBatch>) -> Self {
         Self {
             watchers: Mutex::new(HashMap::new()),
+            pending: std::sync::Mutex::new(HashMap::new()),
             tx,
         }
     }
@@ -177,6 +180,10 @@ impl WatcherManager {
         let watcher_ref = Arc::downgrade(&watcher);
 
         let pending: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(project_root.to_string(), pending.clone());
         let task_pending = pending.clone();
         tokio::spawn(async move {
             let pending = task_pending;
@@ -229,10 +236,7 @@ impl WatcherManager {
 
         watchers.insert(
             project_root.to_string(),
-            WatcherHandle {
-                _watcher: watcher,
-                pending,
-            },
+            WatcherHandle { _watcher: watcher },
         );
     }
 
@@ -244,19 +248,20 @@ impl WatcherManager {
     /// before the server had heard of the edit. The daemon calls this
     /// before every request, so nothing seen so far is held back.
     pub async fn take_pending(&self, project_root: &str) -> Vec<Value> {
-        let watchers = self.watchers.lock().await;
-        let Some(handle) = watchers.get(project_root) else {
+        let Some(buffer) = self.pending.lock().unwrap().get(project_root).cloned() else {
             return vec![];
         };
-        let taken = std::mem::take(&mut *handle.pending.lock().unwrap());
+        let taken = std::mem::take(&mut *buffer.lock().unwrap());
         coalesce(taken)
     }
 
     pub async fn stop(&self, project_root: &str) {
+        self.pending.lock().unwrap().remove(project_root);
         self.watchers.lock().await.remove(project_root);
     }
 
     pub async fn dispose(&self) {
+        self.pending.lock().unwrap().clear();
         self.watchers.lock().await.clear();
     }
 }

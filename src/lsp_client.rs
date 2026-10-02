@@ -707,13 +707,6 @@ impl LspClient {
         Ok(())
     }
 
-    /// Records that files changed without this client sending the change
-    /// as a document edit (`workspace/didChangeWatchedFiles`): published
-    /// diagnostics may be stale until the server publishes again.
-    pub fn mark_external_change(&mut self) {
-        self.sync_generation += 1;
-    }
-
     /// Number of `publishDiagnostics` received for `uri` so far.
     pub fn publish_count(&self, uri: &str) -> u64 {
         self.diagnostics_publishes.get(uri).copied().unwrap_or(0)

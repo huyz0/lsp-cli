@@ -115,4 +115,4 @@ jobs:
           --test definition --test reference --test outline --test symbol
           --test doc --test calls --test diagnostics --test search
           --test doc_sync --test hierarchy --test python --test go_lang
-          --test locate --test install --test watcher
+          --test locate --test install --test watcher --test server
