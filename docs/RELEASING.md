@@ -24,7 +24,9 @@ removed here after the first real CI run proved Windows doesn't compile.
 
 `workflow_dispatch` with a `tag` input re-runs the same pipeline against an
 existing tag, for retrying a failed publish step without cutting a new
-version.
+version. If the tag doesn't exist yet, the run builds the commit it was
+started from and creates the tag there when it publishes: a way to cut a
+release from somewhere that can push branches but not tags.
 
 ## One-time setup for Homebrew publishing
 

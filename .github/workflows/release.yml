@@ -6,13 +6,38 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.2.0) — must already exist"
+        description: "Tag to release (e.g. v0.3.0). If it doesn't exist yet, it is created at the commit this run is started from."
         required: true
 
 permissions:
   contents: write
 
 jobs:
+  # What to build: the tag itself when it exists (a tag push, or re-running
+  # the pipeline for a published version), otherwise the commit a manual
+  # run was started from, which `publish release` then tags. The second
+  # case is for releasing from environments that can push branches but not
+  # tags.
+  resolve:
+    name: resolve ref
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+      tag: ${{ steps.ref.outputs.tag }}
+    steps:
+      - id: ref
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          REPO: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags "$REPO" "refs/tags/$TAG" >/dev/null; then
+            echo "ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG does not exist yet; building $GITHUB_SHA and tagging it on publish."
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
   # Linux + macOS only — Windows is out on purpose, not an oversight: see
   # the `compile_error!` at the top of src/main.rs. The daemon (used by
   # every navigation command for warm server reuse) is Unix Domain
@@ -21,6 +46,7 @@ jobs:
   # git history for the last one that existed) once that lands.
   build:
     name: build (${{ matrix.target }})
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -93,17 +119,17 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - id: tag
-        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ needs.resolve.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
@@ -117,6 +143,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          # Only used when the tag doesn't exist yet: create it at the
+          # commit that was built.
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
