@@ -67,6 +67,10 @@ jobs:
       # gate is always true and their tests are as deterministic as any
       # unit test. They belong in CI and were only missing from it.
       #
+      # `sync_protocol` (and the fake-server tests in `server`, `install`
+      # and `mcp_stdio`) run against tests/support/fake_lsp.py, a scripted
+      # server needing only python3, so they are deterministic too.
+      #
       # `--lib` and the four `--bin lsp-*-lsp` targets are listed
       # explicitly because `--bin lsp` alone runs neither the shared
       # library's tests nor the servers' own.
@@ -77,3 +81,4 @@ jobs:
           --bin lsp-json-lsp --bin lsp-css-lsp --bin lsp-html-lsp --bin lsp-bash-lsp
           --test help --test install --test locate --test schema
           --test server --test mcp_stdio --test web --test bash_lang
+          --test sync_protocol

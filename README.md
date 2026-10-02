@@ -80,7 +80,9 @@ Schema of a command's input.
 
 A language server starts automatically on first use and stays warm in a
 background daemon, reused across calls, so you don't need to manage it
-yourself. `lsp server list` shows what's running.
+yourself: after the first call, commands typically answer in tens of
+milliseconds. Edits to files on disk are picked up before every query.
+`lsp server list` shows what's running.
 
 ## Supported languages
 
@@ -151,7 +153,8 @@ files just fall back to defaults):
   "idleTimeout": 600,
   "managerTimeout": 60,
   "defaultMaxItems": 20,
-  "usePathServers": true
+  "usePathServers": true,
+  "settleMs": 0
 }
 ```
 
@@ -169,6 +172,10 @@ Values above are the defaults. All durations are in **seconds**.
   downloading a copy. "Working" means it answered `--version`; rustup's
   placeholder `rust-analyzer` for an uninstalled component doesn't count.
   Set it to `false` to always use managed installs.
+- `settleMs` (default 0): milliseconds to pause after a file changes,
+  before querying its (non-bundled) server. Not normally needed, since
+  servers process changes in order; an escape hatch if one answers from
+  stale state right after an edit.
 
 Set `LSP_CLI_HOME` to relocate the whole state directory (config, socket,
 installed servers) if you want several independent instances.

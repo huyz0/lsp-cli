@@ -44,13 +44,17 @@ Use grep or read instead when:
   couple of `symbol` calls costs more than one read of a 100-line file.
 - The language is not in the list in the frontmatter.
 
-**Each command costs a few seconds.** Warm calls carry a fixed ~3s wait
-for the server to process the file; the first call against a project also
-waits for its initial index, which is seconds for TypeScript and can be
-much longer for rust-analyzer on a large workspace. Bundled servers
-(Bash, HTML, CSS, JSON) have no such wait. So `lsp` wins decisively on a
-large file or a cross-file question, and loses to `read` on a small one.
-Do not sweep twenty symbols one at a time.
+**Warm calls are fast; the first one is not.** Once a project's server
+is warm, a command typically answers in tens of milliseconds. The first
+call against a project waits for the server to load it, which is seconds
+for TypeScript and can be much longer for rust-analyzer on a large
+workspace. `diagnostics` right after an edit waits (up to a few seconds)
+for the server to finish re-checking. Bundled servers (Bash, HTML, CSS,
+JSON) never wait. So `lsp` wins decisively on a large file or a
+cross-file question, and is roughly even with `read` on a small one.
+
+Edits you make between commands are picked up automatically, including
+edits to files other than the one you query: no need to restart anything.
 
 ## Selecting a symbol: `--scope` and `--find`
 

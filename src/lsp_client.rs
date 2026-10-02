@@ -61,10 +61,80 @@ pub struct LspClient {
     /// opportunistically any time a notification is drained, whether or not
     /// anyone asked for diagnostics.
     diagnostics: std::collections::HashMap<String, Vec<Value>>,
-    /// Version counter per open document URI. `None`/absent means not open.
-    /// See `sync_document` for why this exists.
-    open_docs: std::collections::HashMap<String, i64>,
+    /// Every document this server has open, with the exact text it was
+    /// given. See `sync_document` and `resync_from_disk` for why the text
+    /// (and the file's on-disk stamp) is kept.
+    open_docs: std::collections::HashMap<String, OpenDoc>,
+    /// Bumped on every didOpen/didChange/didClose this client sends, so a
+    /// diagnostics consumer can tell whether a cached `publishDiagnostics`
+    /// predates the latest edit. See `diagnostics_are_current`.
+    sync_generation: u64,
+    /// `sync_generation` as of the last `publishDiagnostics` per URI.
+    diagnostics_generation: std::collections::HashMap<String, u64>,
+    /// How many `publishDiagnostics` have arrived per URI, so a waiter can
+    /// tell when a server has stopped publishing (see `publish_count`).
+    diagnostics_publishes: std::collections::HashMap<String, u64>,
+    /// `sync_generation` as of the last time a caller already waited for
+    /// diagnostics on a URI. typescript-language-server only publishes when
+    /// a file's diagnostics *change*, so after an unrelated edit no publish
+    /// may ever come; without remembering the wait, every later call paid
+    /// it again.
+    diagnostics_waited: std::collections::HashMap<String, u64>,
+    /// Monotonic use counter for least-recently-used eviction.
+    use_clock: u64,
+    /// Work-done progress the server has begun and not yet ended (tokens
+    /// rendered as strings). Servers report project loading this way —
+    /// typescript-language-server's "Initializing JS/TS language features",
+    /// gopls's "Loading packages", rust-analyzer's indexing — and answer
+    /// navigation requests incompletely until it ends. See `is_busy`.
+    active_progress: std::collections::HashSet<String>,
+    /// Whether any progress has been reported at all, so a readiness wait
+    /// knows whether this server reports progress.
+    saw_progress: bool,
+    /// rust-analyzer's `experimental/serverStatus` `quiescent` flag.
+    quiescent: Option<bool>,
 }
+
+/// A document open in the server.
+struct OpenDoc {
+    version: i64,
+    text: String,
+    /// `(mtime, length)` of the file when `text` was last read from it, so
+    /// `resync_from_disk` can skip unchanged files with a single `stat`.
+    stamp: Option<(std::time::SystemTime, u64)>,
+    last_used: u64,
+}
+
+/// How many documents one server keeps open at once.
+///
+/// Every document a command touches used to stay open for the server's
+/// whole life. Besides the memory, each open document is one more file
+/// whose in-memory copy overrides the disk and has to be kept in sync, so
+/// least-recently-used ones beyond this are closed — after which the server
+/// reads them from disk like any other file in the project.
+const MAX_OPEN_DOCS: usize = 16;
+
+/// `(mtime, length)` of `path`, if it can be trusted to identify the
+/// file's content.
+///
+/// A file modified within the last couple of seconds gets `None`: on a
+/// filesystem with coarse timestamps, two same-length writes inside one
+/// tick share a stamp, and a write landing between the CLI reading a file
+/// and the daemon stamping it would pair the new stamp with the old text.
+/// Either way the edit would be skipped forever. With no stamp, the next
+/// resync compares content instead, which costs one read of a recently
+/// edited file.
+fn disk_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    (age >= STAMP_TRUSTED_AFTER).then_some((modified, meta.len()))
+}
+
+/// See `disk_stamp`.
+const STAMP_TRUSTED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl LspClient {
     pub async fn spawn(server_path: &str, args: &[String], workspace_root: &str) -> Result<Self> {
@@ -98,6 +168,14 @@ impl LspClient {
             incoming: rx,
             diagnostics: std::collections::HashMap::new(),
             open_docs: std::collections::HashMap::new(),
+            sync_generation: 0,
+            diagnostics_generation: std::collections::HashMap::new(),
+            diagnostics_publishes: std::collections::HashMap::new(),
+            diagnostics_waited: std::collections::HashMap::new(),
+            use_clock: 0,
+            active_progress: std::collections::HashSet::new(),
+            saw_progress: false,
+            quiescent: None,
         })
     }
 
@@ -217,8 +295,20 @@ impl LspClient {
     /// as they're drained, whether or not the current caller asked for
     /// them — see the `diagnostics` field doc comment.
     fn maybe_record_notification(&mut self, method: Option<&str>, msg: &Value) {
-        if method != Some("textDocument/publishDiagnostics") {
-            return;
+        match method {
+            Some("$/progress") => {
+                self.record_progress(msg);
+                return;
+            }
+            Some("experimental/serverStatus") => {
+                self.quiescent = msg
+                    .get("params")
+                    .and_then(|p| p.get("quiescent"))
+                    .and_then(|q| q.as_bool());
+                return;
+            }
+            Some("textDocument/publishDiagnostics") => {}
+            _ => return,
         }
         let Some(params) = msg.get("params") else {
             return;
@@ -232,6 +322,12 @@ impl LspClient {
             .unwrap_or(Value::Array(vec![]));
         let items = items.as_array().cloned().unwrap_or_default();
         self.diagnostics.insert(uri.to_string(), items);
+        self.diagnostics_generation
+            .insert(uri.to_string(), self.sync_generation);
+        *self
+            .diagnostics_publishes
+            .entry(uri.to_string())
+            .or_default() += 1;
     }
 
     /// Drains whatever's already buffered in the incoming channel (without
@@ -254,6 +350,43 @@ impl LspClient {
         }
     }
 
+    fn record_progress(&mut self, msg: &Value) {
+        let Some(params) = msg.get("params") else {
+            return;
+        };
+        let token = match params.get("token") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => return,
+        };
+        match params
+            .get("value")
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str())
+        {
+            Some("begin") => {
+                self.saw_progress = true;
+                self.active_progress.insert(token);
+            }
+            Some("end") => {
+                self.active_progress.remove(&token);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the server says it is still loading or indexing: some
+    /// work-done progress is open, or rust-analyzer reports itself not
+    /// quiescent.
+    pub fn is_busy(&self) -> bool {
+        !self.active_progress.is_empty() || self.quiescent == Some(false)
+    }
+
+    /// Whether this server has reported any progress or status yet.
+    pub fn reports_progress(&self) -> bool {
+        self.saw_progress || self.quiescent.is_some()
+    }
+
     pub fn cached_diagnostics(&self, uri: &str) -> Vec<Value> {
         self.diagnostics.get(uri).cloned().unwrap_or_default()
     }
@@ -267,39 +400,202 @@ impl LspClient {
         self.send(&msg).await
     }
 
-    /// Opens `uri` in this server, or — if it's already open in this warm
-    /// session (from an earlier call reusing the same server) — sends a
-    /// full-text `didChange` instead of a second `didOpen`.
+    /// Opens `uri` in this server with `text`, or — if it's already open
+    /// in this warm session — updates it with a full-text `didChange`.
+    /// Returns whether the server's view of the document changed.
     ///
-    /// This matters beyond efficiency: every navigation command
-    /// unconditionally "opens" its target file before querying, so with
-    /// warm server reuse the *second* call against an already-open file
-    /// used to send a duplicate `didOpen`. Observed live against
-    /// typescript-language-server: it rejects that with `Can't open
-    /// already open document` and silently skips reprocessing the file —
-    /// which starved `textDocument/publishDiagnostics` of ever firing for
-    /// that call, since the server never re-analyzed the "already open"
-    /// document. `didChange` is what every real editor sends for a
-    /// still-open document and is always accepted.
-    pub async fn sync_document(&mut self, uri: &str, language_id: &str, text: &str) -> Result<()> {
-        if let Some(version) = self.open_docs.get_mut(uri) {
-            *version += 1;
-            let version = *version;
-            self.notify(
-                "textDocument/didChange",
-                json!({
-                    "textDocument": { "uri": uri, "version": version },
-                    "contentChanges": [{ "text": text }]
-                }),
-            )
-            .await
+    /// Re-opening an already-open document used to send a duplicate
+    /// `didOpen`. typescript-language-server rejects that (`Can't open
+    /// already open document`) and silently skips reprocessing, which
+    /// starved diagnostics of ever re-running for that call. `didChange` is
+    /// what every editor sends for a still-open document.
+    ///
+    /// Identical text sends nothing at all: there is nothing for the server
+    /// to re-analyze, and the caller can skip waiting for it to.
+    pub async fn sync_document(
+        &mut self,
+        uri: &str,
+        language_id: &str,
+        text: &str,
+    ) -> Result<bool> {
+        self.use_clock += 1;
+        let now = self.use_clock;
+        let stamp = disk_stamp(&lsp::uri::to_path(uri));
+        let changed = if let Some(doc) = self.open_docs.get_mut(uri) {
+            doc.last_used = now;
+            doc.stamp = stamp;
+            if doc.text == text {
+                false
+            } else {
+                doc.version += 1;
+                doc.text = text.to_string();
+                let version = doc.version;
+                self.notify(
+                    "textDocument/didChange",
+                    json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }]
+                    }),
+                )
+                .await?;
+                true
+            }
         } else {
-            self.open_docs.insert(uri.to_string(), 1);
             self.notify(
                 "textDocument/didOpen",
                 json!({ "textDocument": { "uri": uri, "languageId": language_id, "version": 1, "text": text } }),
             )
-            .await
+            .await?;
+            self.open_docs.insert(
+                uri.to_string(),
+                OpenDoc {
+                    version: 1,
+                    text: text.to_string(),
+                    stamp,
+                    last_used: now,
+                },
+            );
+            true
+        };
+        if changed {
+            self.sync_generation += 1;
+        }
+        self.close_least_recently_used(uri).await?;
+        Ok(changed)
+    }
+
+    /// Brings every open document other than `except` back in line with
+    /// the disk. Returns whether anything was sent.
+    ///
+    /// For an open document the server's copy overrides the file, and
+    /// `didChangeWatchedFiles` doesn't change that. So once a command had
+    /// opened a file, an edit to it on disk was invisible to every later
+    /// query that targeted a *different* file: definitions pointed at old
+    /// lines, diagnostics missed new errors, and a rename computed its
+    /// edits against the stale text and `--apply` wrote them at the wrong
+    /// offsets. A `stat` per open document (at most `MAX_OPEN_DOCS`) is
+    /// the whole cost when nothing changed.
+    pub async fn resync_from_disk(&mut self, except: Option<&str>) -> Result<bool> {
+        let mut changed = false;
+        let uris: Vec<String> = self
+            .open_docs
+            .keys()
+            .filter(|u| Some(u.as_str()) != except)
+            .cloned()
+            .collect();
+        for uri in uris {
+            let path = lsp::uri::to_path(&uri);
+            let stamp = disk_stamp(&path);
+            let Some(doc) = self.open_docs.get_mut(&uri) else {
+                continue;
+            };
+            if stamp.is_some() && stamp == doc.stamp {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    doc.stamp = stamp;
+                    if text == doc.text {
+                        continue;
+                    }
+                    doc.version += 1;
+                    doc.text = text;
+                    let msg = json!({
+                        "textDocument": { "uri": uri, "version": doc.version },
+                        "contentChanges": [{ "text": doc.text }]
+                    });
+                    self.notify("textDocument/didChange", msg).await?;
+                }
+                // Deleted (or unreadable): stop overriding it, so the server
+                // goes back to whatever the disk says.
+                Err(_) => self.close_document(&uri).await?,
+            }
+            changed = true;
+        }
+        if changed {
+            self.sync_generation += 1;
+        }
+        Ok(changed)
+    }
+
+    async fn close_document(&mut self, uri: &str) -> Result<()> {
+        if self.open_docs.remove(uri).is_some() {
+            self.notify(
+                "textDocument/didClose",
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .await?;
+            self.sync_generation += 1;
+        }
+        Ok(())
+    }
+
+    async fn close_least_recently_used(&mut self, keep: &str) -> Result<()> {
+        while self.open_docs.len() > MAX_OPEN_DOCS {
+            let Some(oldest) = self
+                .open_docs
+                .iter()
+                .filter(|(u, _)| u.as_str() != keep)
+                .min_by_key(|(_, d)| d.last_used)
+                .map(|(u, _)| u.clone())
+            else {
+                break;
+            };
+            self.close_document(&oldest).await?;
+        }
+        Ok(())
+    }
+
+    /// Number of `publishDiagnostics` received for `uri` so far.
+    pub fn publish_count(&self, uri: &str) -> u64 {
+        self.diagnostics_publishes.get(uri).copied().unwrap_or(0)
+    }
+
+    /// Whether the cached `publishDiagnostics` for `uri` arrived after the
+    /// most recent document change this client sent.
+    ///
+    /// Also true once a caller has already waited out a change for this URI
+    /// (`mark_diagnostics_waited`) — a server that had nothing new to say
+    /// then isn't going to say it on the next call either.
+    pub fn diagnostics_are_current(&self, uri: &str) -> bool {
+        let current = |m: &std::collections::HashMap<String, u64>| {
+            m.get(uri).is_some_and(|g| *g >= self.sync_generation)
+        };
+        current(&self.diagnostics_generation) || current(&self.diagnostics_waited)
+    }
+
+    /// Records that the cached diagnostics for `uri` have been waited for
+    /// as of the current document state.
+    pub fn mark_diagnostics_waited(&mut self, uri: &str) {
+        self.diagnostics_waited
+            .insert(uri.to_string(), self.sync_generation);
+    }
+
+    /// Processes incoming messages for up to `timeout` (answering server
+    /// requests and caching notifications), returning early once `done`
+    /// holds. For waits on push-only state such as diagnostics.
+    pub async fn pump_until(&mut self, timeout: std::time::Duration, done: impl Fn(&Self) -> bool) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            self.drain_pending_notifications().await;
+            if done(self) {
+                return;
+            }
+            let Ok(Some(msg)) = tokio::time::timeout_at(deadline, self.incoming.recv()).await
+            else {
+                return;
+            };
+            if is_server_request(&msg) {
+                let _ = self.respond_to_server_request(&msg).await;
+                continue;
+            }
+            let method = msg
+                .get("method")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            if msg.get("id").is_none() {
+                self.maybe_record_notification(method.as_deref(), &msg);
+            }
         }
     }
 
@@ -338,6 +634,12 @@ impl LspClient {
                             "typeHierarchy": {},
                             "rename": {"prepareSupport": false}
                         },
+                        // Without these, servers have no channel to say
+                        // "still loading the project", and answer requests
+                        // made in the meantime incompletely (a definition
+                        // that stops at the import). See `is_busy`.
+                        "window": {"workDoneProgress": true},
+                        "experimental": {"serverStatusNotification": true},
                         "workspace": {
                             "symbol": {},
                             // `collect_edits` handles the `documentChanges`

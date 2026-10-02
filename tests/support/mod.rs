@@ -371,7 +371,7 @@ pub struct FakeServerProject {
     pub dir: PathBuf,
     pub markers: PathBuf,
     path: String,
-    extra: Vec<(String, String)>,
+    extra: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl FakeServerProject {
@@ -402,8 +402,16 @@ impl FakeServerProject {
             dir,
             markers,
             path,
-            extra,
+            extra: std::sync::Mutex::new(extra),
         }
+    }
+
+    /// Adds an environment variable for every later `run`.
+    pub fn set_env(&self, key: &str, value: &str) {
+        self.extra
+            .lock()
+            .unwrap()
+            .push((key.to_string(), value.to_string()));
     }
 
     pub fn file(&self) -> String {
@@ -411,8 +419,67 @@ impl FakeServerProject {
     }
 
     pub fn run(&self, args: &[&str]) -> RunResult {
+        let extra = self.extra.lock().unwrap().clone();
         let mut envs: Vec<(&str, &str)> = vec![("PATH", self.path.as_str())];
-        envs.extend(self.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        envs.extend(extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         lsp_in_env(&self.home, args, &envs)
     }
+}
+
+/// A private, writable copy of the TypeScript fixture project, for tests
+/// that edit files. `node_modules` is linked rather than copied (the
+/// server needs the project's own `typescript`).
+pub fn ts_project_copy() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("lsp-ts-")
+        .tempdir_in(temp_root())
+        .unwrap();
+    let src = fixture("typescript_project");
+    for name in ["package.json", "tsconfig.json"] {
+        std::fs::copy(src.join(name), dir.path().join(name)).unwrap();
+    }
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    for entry in std::fs::read_dir(src.join("src")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        // Left behind by diagnostics.rs; not part of the fixture.
+        if name == "diagnostics_check.ts" {
+            continue;
+        }
+        std::fs::copy(entry.path(), dir.path().join("src").join(name)).unwrap();
+    }
+    if src.join("node_modules").exists() {
+        std::os::unix::fs::symlink(src.join("node_modules"), dir.path().join("node_modules"))
+            .unwrap();
+    }
+    dir
+}
+
+/// Inserts `text` at the very start of `file`, shifting every line down.
+pub fn prepend(file: &Path, text: &str) {
+    let old = std::fs::read_to_string(file).unwrap();
+    std::fs::write(file, format!("{text}{old}")).unwrap();
+}
+
+/// The single location in a `definition`/`reference` JSON result, as
+/// `(file name, line, character)`.
+pub fn locations(data: &serde_json::Value) -> Vec<(String, u64, u64)> {
+    data["locations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no locations in {data}"))
+        .iter()
+        .map(|l| {
+            let uri = l["uri"].as_str().unwrap();
+            let name = Path::new(uri)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            (
+                name,
+                l["line"].as_u64().unwrap(),
+                l["character"].as_u64().unwrap(),
+            )
+        })
+        .collect()
 }

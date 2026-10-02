@@ -12,6 +12,10 @@ pub struct LspCliConfig {
     /// managed install directory, instead of downloading one.
     #[serde(default = "default_use_path_servers")]
     pub use_path_servers: bool,
+    /// Milliseconds to pause after a document change before querying a
+    /// (non-bundled) server. See `commands::settle_delay`.
+    #[serde(default)]
+    pub settle_ms: u64,
 }
 
 fn default_idle_timeout() -> u64 {
@@ -40,6 +44,7 @@ impl Default for LspCliConfig {
             manager_timeout: default_manager_timeout(),
             default_max_items: default_max_items(),
             use_path_servers: default_use_path_servers(),
+            settle_ms: 0,
         }
     }
 }
@@ -75,6 +80,9 @@ fn load_config_from(path: &std::path::Path) -> LspCliConfig {
             }
             if let Some(b) = v.get("usePathServers").and_then(|x| x.as_bool()) {
                 cfg.use_path_servers = b;
+            }
+            if let Some(n) = v.get("settleMs").and_then(|x| x.as_u64()) {
+                cfg.settle_ms = n;
             }
             cfg
         })
@@ -115,6 +123,15 @@ mod tests {
         // A wrong type is ignored, not a reason to flip the default.
         std::fs::write(&path, r#"{"usePathServers": "no"}"#).unwrap();
         assert!(load_config_from(&path).use_path_servers);
+    }
+
+    #[test]
+    fn settle_ms_defaults_to_zero_and_is_read_from_the_file() {
+        assert_eq!(LspCliConfig::default().settle_ms, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"settleMs": 250}"#).unwrap();
+        assert_eq!(load_config_from(&path).settle_ms, 250);
     }
 
     #[test]

@@ -12,7 +12,13 @@ use tokio::net::UnixStream;
 
 use crate::daemon::{socket_path, ManagedServerInfo};
 
-pub struct ManagerClient;
+/// Talks to the daemon. `fresh` records whether the session this client
+/// set up (see `commands::ensure_daemon_session`) just started a server or
+/// changed a document, i.e. whether the server may still be catching up.
+#[derive(Default)]
+pub struct ManagerClient {
+    pub fresh: bool,
+}
 
 use crate::paths::spawn_lock_path;
 
@@ -39,7 +45,7 @@ fn spawn_lock_is_stale(path: &Path) -> bool {
 
 impl ManagerClient {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
     /// Liveness probe. Deliberately does *not* go through `raw_request`'s
@@ -273,13 +279,19 @@ impl ManagerClient {
         language: Option<&str>,
         method: &str,
         params: Value,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let body = serde_json::json!({ "project_root": project_root, "language": language, "method": method, "params": params }).to_string();
         let (status, resp) = raw_request("POST", "/notify", Some(body)).await?;
-        if status != 204 {
-            bail!("{resp}");
+        match status {
+            200 => Ok(serde_json::from_str::<Value>(&resp)
+                .ok()
+                .and_then(|v| v.get("changed").and_then(|c| c.as_bool()))
+                .unwrap_or(true)),
+            // A daemon from an older build, which doesn't say: assume the
+            // worst, i.e. that something changed.
+            204 => Ok(true),
+            _ => bail!("{resp}"),
         }
-        Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {

@@ -47,6 +47,11 @@ pub struct ManagedServerInfo {
     /// excluded from `list` output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub just_started: bool,
+    /// Whether the server still reports itself busy loading the project
+    /// (open work-done progress) as of this response. Like `just_started`,
+    /// tells the CLI an incomplete-looking answer may be worth retrying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loading: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,9 +246,12 @@ impl Manager {
             .get(&key)
             .map(|e| e.client.clone());
         if let Some(client) = existing {
-            let alive = match client.try_lock() {
-                Ok(mut c) => c.is_alive(),
-                Err(_) => true,
+            let (alive, loading) = match client.try_lock() {
+                Ok(mut c) => {
+                    c.drain_pending_notifications().await;
+                    (c.is_alive(), c.is_busy())
+                }
+                Err(_) => (true, false),
             };
             let mut servers = self.servers.lock().await;
             // Only act on the entry we inspected: the reaper may have
@@ -257,6 +265,7 @@ impl Manager {
                 entry.info.idle_since = now_ms();
                 let mut info = entry.info.clone();
                 info.just_started = false;
+                info.loading = loading;
                 return Ok(info);
             }
             if same {
@@ -278,6 +287,7 @@ impl Manager {
             idle_since: now_ms(),
             pid: None,
             just_started: true,
+            loading: false,
         };
 
         let client_res = LspClient::spawn(&bin.to_string_lossy(), &args, &root).await;
@@ -304,14 +314,21 @@ impl Manager {
         // command arriving during a cold start saw an entry that existed,
         // treated it as warm, and queried a server that was still loading.
         wait_until_indexed(&mut client, detected.lang.name, file_path).await;
+        info.loading = client.is_busy();
 
         self.watcher
             .ensure_watching(&root, detected.lang.extensions)
             .await;
 
+        // The stored copy describes the server, not this response: it was
+        // listed by `server list` with `just_started: true` forever.
         let entry = ManagedServer {
             client: Arc::new(Mutex::new(client)),
-            info: info.clone(),
+            info: ManagedServerInfo {
+                just_started: false,
+                loading: false,
+                ..info.clone()
+            },
         };
         self.servers.lock().await.insert(key, entry);
         Ok(info)
@@ -364,6 +381,9 @@ impl Manager {
     ) -> Result<Value> {
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
+        // Files edited on disk since the server last saw them, other than
+        // through this tool, would otherwise be answered from stale memory.
+        c.resync_from_disk(None).await?;
 
         if method == "textDocument/diagnostic" {
             return Self::diagnostic_with_push_fallback(&mut c, method, &params).await;
@@ -390,27 +410,71 @@ impl Manager {
                     crate::lsp_client::METHOD_NOT_FOUND,
                 ) =>
             {
-                c.drain_pending_notifications().await;
                 let uri = params
                     .get("textDocument")
                     .and_then(|t| t.get("uri"))
                     .and_then(|u| u.as_str())
-                    .unwrap_or_default();
-                Ok(serde_json::json!({ "items": c.cached_diagnostics(uri) }))
+                    .unwrap_or_default()
+                    .to_string();
+                // Push diagnostics arrive whenever the server finishes
+                // analysing, so after an edit the cached set is stale until
+                // the next publish. Wait for one that postdates the latest
+                // change, but only as long as an analysis pass plausibly
+                // takes. typescript-language-server re-publishes a file only
+                // when its diagnostics changed, so after an edit that didn't
+                // affect this file nothing arrives: a file that has
+                // published before gets the shorter wait, and the wait is
+                // recorded so the next call with nothing new skips it.
+                c.drain_pending_notifications().await;
+                if !c.diagnostics_are_current(&uri) {
+                    let wait = if c.publish_count(&uri) > 0 {
+                        PUSH_DIAGNOSTICS_REPUBLISH_WAIT
+                    } else {
+                        PUSH_DIAGNOSTICS_WAIT
+                    };
+                    let deadline = tokio::time::Instant::now() + wait;
+                    c.pump_until(wait, |c| c.diagnostics_are_current(&uri))
+                        .await;
+                    // Servers publish in stages — typescript-language-
+                    // server sends syntactic diagnostics first and the
+                    // (slower) semantic ones in a later publish — so the
+                    // first publish after an edit can be an incomplete,
+                    // often empty, set. Keep listening until the file has
+                    // been quiet for a moment.
+                    loop {
+                        let seen = c.publish_count(&uri);
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        c.pump_until(PUSH_DIAGNOSTICS_QUIET.min(remaining), |c| {
+                            c.publish_count(&uri) != seen
+                        })
+                        .await;
+                        if c.publish_count(&uri) == seen {
+                            break;
+                        }
+                    }
+                    c.mark_diagnostics_waited(&uri);
+                }
+                Ok(serde_json::json!({ "items": c.cached_diagnostics(&uri) }))
             }
             Err(e) => Err(e),
         }
     }
 
-    /// Same as `proxy_request` but for a fire-and-forget notification
-    /// (`textDocument/didOpen`, etc.) — no result to return.
+    /// Same as `proxy_request` but for a notification (`textDocument/
+    /// didOpen`, etc.). Returns whether the server's view of the project's
+    /// open documents changed — always `true` for anything but `didOpen`,
+    /// which is the one this tool can tell is a no-op.
     pub async fn proxy_notify(
         &self,
         project_root: &str,
         language: Option<&str>,
         method: &str,
         params: Value,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
 
@@ -418,14 +482,15 @@ impl Manager {
             return Self::didopen_as_sync_document(&mut c, &params).await;
         }
 
-        c.notify(method, params).await
+        c.notify(method, params).await?;
+        Ok(true)
     }
 
     /// See `LspClient::sync_document` — every navigation command "opens"
     /// its target file unconditionally, but with warm server reuse the
     /// file may already be open from an earlier call, so this needs to
     /// become a `didChange` instead of a second `didOpen`.
-    async fn didopen_as_sync_document(c: &mut LspClient, params: &Value) -> Result<()> {
+    async fn didopen_as_sync_document(c: &mut LspClient, params: &Value) -> Result<bool> {
         let uri = params
             .get("textDocument")
             .and_then(|t| t.get("uri"))
@@ -441,7 +506,9 @@ impl Manager {
             .and_then(|t| t.get("text"))
             .and_then(|t| t.as_str())
             .unwrap_or_default();
-        c.sync_document(uri, language_id, text).await
+        let others = c.resync_from_disk(Some(uri)).await?;
+        let this = c.sync_document(uri, language_id, text).await?;
+        Ok(others || this)
     }
 
     async fn find_running_client(
@@ -651,15 +718,29 @@ fn now_ms() -> i64 {
 /// gopls reports `no package metadata` until its initial load completes,
 /// rust-analyzer takes longer still — so waiting for the observed condition
 /// beats any constant large enough for the slowest of them.
+/// Longest `diagnostics` waits for a server that only pushes diagnostics
+/// to publish a settled set newer than the latest edit. Paid only by a
+/// diagnostics call that follows an edit, and only until the publishes
+/// stop; it replaces the 3s the CLI used to sleep before every command.
+const PUSH_DIAGNOSTICS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The wait for a file that has published diagnostics before, and so will
+/// only publish again if they changed. Covers a re-check pass of a warm
+/// server; if nothing arrives by then, the cached set still stands.
+const PUSH_DIAGNOSTICS_REPUBLISH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a file must go without a new `publishDiagnostics` before the
+/// set is taken as final. See `diagnostic_with_push_fallback`.
+const PUSH_DIAGNOSTICS_QUIET: std::time::Duration = std::time::Duration::from_millis(750);
+
 const INDEX_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const INDEX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Blocks until `client` can answer `documentSymbol` for `file_path`, or
 /// the timeout elapses.
 ///
-/// Best-effort by design: a file that genuinely contains no symbols polls
-/// until the deadline and then proceeds, which is correct but slow — so
-/// this runs exactly once per spawned server, never on the warm path.
+/// Best-effort by design: every phase is bounded, and it runs exactly once
+/// per spawned server, never on the warm path.
 /// Skipped for the bundled tree-sitter servers, which parse synchronously
 /// inside the request handler and have no indexing phase at all.
 async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &std::path::Path) {
@@ -689,10 +770,43 @@ async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &
     // Phase 1: syntax. `documentSymbol` is answered from the parse alone,
     // so this returns as soon as the file has been read — which is what
     // `outline` needs, and no more than that.
-    let Some(probe_position) = poll_document_symbol(client, &uri, deadline).await else {
-        return;
-    };
+    if let Some(probe_position) = poll_document_symbol(client, &uri, deadline).await {
+        wait_for_hover(client, &uri, probe_position, deadline).await;
+    }
 
+    // Phase 3: project load. A hover that answers proves the file is
+    // parsed, not that the rest of the project is loaded: a cold
+    // typescript-language-server resolves a definition only as far as the
+    // local import binding until it finishes "Initializing JS/TS language
+    // features". Servers announce that as work-done progress (advertised
+    // in `initialize`), so wait for it to end. Progress may begin a moment
+    // after the first answers, hence the short grace period before
+    // concluding a server doesn't report any.
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    client
+        .pump_until(PROGRESS_GRACE.min(remaining), |c| c.reports_progress())
+        .await;
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .min(PROJECT_LOAD_WAIT);
+    client.pump_until(remaining, |c| !c.is_busy()).await;
+}
+
+/// Cap on phase 3 of `wait_until_indexed`. Loading the project's own
+/// sources is seconds; what can take far longer is work a navigation
+/// command rarely needs — rust-analyzer running every build script and
+/// proc-macro through `cargo check`, a progress token a buggy server never
+/// ends. Past this, the server is handed out still loading and reported as
+/// such (`ManagedServerInfo::loading`), so the CLI keeps retrying answers
+/// that look incomplete.
+const PROJECT_LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn wait_for_hover(
+    client: &mut LspClient,
+    uri: &str,
+    probe_position: Value,
+    deadline: std::time::Instant,
+) {
     // Phase 2: types. This is the part `documentSymbol` does not prove.
     // gopls answers hover and definition with `no package metadata for
     // file` until its initial package load finishes, while happily
@@ -721,6 +835,10 @@ async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &
     }
 }
 
+/// How long a freshly started server gets to report its first progress
+/// before the readiness wait assumes it doesn't report any.
+const PROGRESS_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Polls `documentSymbol` until the server returns at least one symbol, and
 /// yields a position inside the first one to probe type-readiness with.
 async fn poll_document_symbol(
@@ -729,6 +847,7 @@ async fn poll_document_symbol(
     deadline: std::time::Instant,
 ) -> Option<Value> {
     let params = serde_json::json!({ "textDocument": { "uri": uri } });
+    let mut empty_since: Option<std::time::Instant> = None;
     while std::time::Instant::now() < deadline {
         // An error here means "still loading" for several servers, so it is
         // a reason to keep waiting rather than to stop.
@@ -739,11 +858,29 @@ async fn poll_document_symbol(
             if let Some(pos) = first_symbol_position(&v) {
                 return Some(pos);
             }
+            // A successful empty answer is either "still loading" or "this
+            // file has no symbols" (a barrel file of re-exports, an empty
+            // module). Waiting for symbols that will never come used to
+            // cost such a file the full 60s on every cold start. Stop once
+            // the server says it is idle, or once the empty answer has held
+            // long enough to be believed.
+            let since = *empty_since.get_or_insert_with(std::time::Instant::now);
+            client.drain_pending_notifications().await;
+            if (client.reports_progress() && !client.is_busy())
+                || since.elapsed() >= EMPTY_OUTLINE_BELIEVED_AFTER
+            {
+                return None;
+            }
         }
         tokio::time::sleep(INDEX_POLL_INTERVAL).await;
     }
     None
 }
+
+/// How long `documentSymbol` must keep answering an empty list, from a
+/// server that doesn't report progress, before the file is taken to have
+/// no symbols.
+const EMPTY_OUTLINE_BELIEVED_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Start of the first symbol's name in a `documentSymbol` reply.
 ///
@@ -817,7 +954,7 @@ async fn request_handler(
 async fn notify_handler(
     State(m): State<SharedManager>,
     Json(req): Json<ProxyRequest>,
-) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     m.proxy_notify(
         &req.project_root,
         req.language.as_deref(),
@@ -825,7 +962,7 @@ async fn notify_handler(
         req.params,
     )
     .await
-    .map(|_| axum::http::StatusCode::NO_CONTENT)
+    .map(|changed| Json(serde_json::json!({ "changed": changed })))
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -836,7 +973,31 @@ async fn search_handler(
     Json(m.search(&req.project_root, &req.query).await)
 }
 
+/// The socket this daemon bound: its path and inode.
+static BOUND_SOCKET: std::sync::OnceLock<(std::path::PathBuf, u64)> = std::sync::OnceLock::new();
+
+/// Removes the socket file, but only if it is still the one this daemon
+/// bound. Once a shutting-down daemon has given up its path, a new daemon
+/// may already have bound a fresh socket there; deleting *that* would
+/// orphan the new daemon.
+fn remove_own_socket() {
+    use std::os::unix::fs::MetadataExt;
+    let Some((path, ino)) = BOUND_SOCKET.get() else {
+        return;
+    };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.ino() == *ino) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
+    // Give up the socket path first. It used to stay bound until after
+    // every server had shut down and a grace period had passed, so a
+    // command issued right after `server shutdown` found the old daemon
+    // still answering `is_alive`, then lost it mid-command ("cannot reach
+    // manager daemon") instead of starting a new one. The connection this
+    // request arrived on is unaffected.
+    remove_own_socket();
     // Snapshot then release, as in `delete`/`reap_idle`: each `shutdown()`
     // awaits up to 3s, and holding the map lock across all of them blocks
     // any request still in flight while we're trying to exit.
@@ -850,12 +1011,6 @@ async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusC
     m.watcher.dispose().await;
     tokio::spawn(async {
         tokio::time::sleep(EXIT_GRACE_PERIOD).await;
-        // Remove the socket before exiting. `process::exit` skips the
-        // cleanup at the end of `start_daemon`, so a graceful shutdown used
-        // to leave the socket file behind with nothing listening — after
-        // which every `connect()` got ECONNREFUSED (rather than the
-        // ENOENT that says "no daemon") until something rebound it.
-        let _ = std::fs::remove_file(socket_path());
         std::process::exit(0);
     });
     axum::http::StatusCode::NO_CONTENT
@@ -923,8 +1078,9 @@ pub async fn start_daemon() -> Result<()> {
     let listener = tokio::net::UnixListener::bind(&path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let _ = BOUND_SOCKET.set((path.clone(), std::fs::symlink_metadata(&path)?.ino()));
     }
     let (manager, mut watch_rx) = Manager::new();
     let manager: SharedManager = Arc::new(manager);
@@ -965,7 +1121,7 @@ pub async fn start_daemon() -> Result<()> {
         _ = tokio::signal::ctrl_c() => {}
         _ = sigterm.recv() => {}
     }
-    let _ = std::fs::remove_file(&path);
+    remove_own_socket();
     Ok(())
 }
 

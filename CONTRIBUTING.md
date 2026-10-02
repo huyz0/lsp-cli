@@ -108,6 +108,19 @@ across the files under `tests/`, against fixture projects in
   directly against source snippets, with no stdio connection involved.
   These need no installed language server — they are built from this repo
   — so they run in CI along with `web.rs` and `bash_lang.rs`.
+- **Fake server** (`tests/support/fake_lsp.py`, driven through
+  `support::FakeServerProject`): a scripted language server installed as
+  `zls` on a private `PATH`, for tests that need to control or observe
+  what a server sees — a hover that hangs on purpose, or a log of every
+  method received. `sync_protocol.rs` uses it to pin the document-sync
+  rules (unchanged files aren't resent, edited ones are re-synced, deleted
+  ones closed, at most 16 kept open, warm calls don't wait). Needs only
+  `python3`, so it runs in CI.
+- **`doc_sync.rs`** checks the same rules end to end against a real
+  TypeScript server: edit a file an earlier command opened, then query a
+  different one (definition lines, diagnostics, and a rename `--apply`
+  whose exact output text is compared). Each test works on its own copy
+  of the fixture (`support::ts_project_copy`).
 - **`server.rs`** exercises the real background daemon lifecycle. No LSP
   server needed for list/stop/shutdown against an empty/no-daemon state;
   3 more (gated on `has_ts_server()`) cover daemon concurrency:

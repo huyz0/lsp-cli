@@ -335,3 +335,19 @@ fn wait_until_secs(mut cond: impl FnMut() -> bool, what: &str, secs: u64) {
     }
     panic!("timed out waiting for: {what}");
 }
+
+/// A command issued right after `server shutdown` used to find the old
+/// daemon still bound to the socket, pass its liveness check, and then fail
+/// with "cannot reach manager daemon" once that daemon went away, instead
+/// of starting a new one.
+#[test]
+fn a_command_right_after_shutdown_starts_a_fresh_daemon() {
+    let home = isolated_home("after-shutdown");
+    assert_eq!(lsp_in(&home, &["server", "list"]).exit_code, 0);
+    for _ in 0..3 {
+        let down = lsp_in(&home, &["server", "shutdown"]);
+        assert_eq!(down.exit_code, 0, "{}", down.stderr);
+        let next = lsp_in(&home, &["server", "list", "--output", "json"]);
+        assert_eq!(next.exit_code, 0, "{}", next.stderr);
+    }
+}

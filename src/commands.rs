@@ -13,35 +13,31 @@ use std::path::{Path, PathBuf};
 
 use lsp::text_pos::utf16_col_to_byte;
 
-/// How long to wait after `didOpen`/`didChange` before issuing the actual
-/// request, giving the server time to build its AST.
+/// Optional pause after a document change, before the request
+/// (`settleMs` in the config, default 0).
 ///
-/// Still a sleep rather than a poll, because a *warm* server has no
-/// observable "done" signal for a single-document change — but it is now
-/// sized to the situation instead of being one worst-case constant paid by
-/// everything.
+/// This used to be a fixed 3000ms sleep before *every* command against a
+/// non-bundled server — about 99% of a warm command's wall time — even when
+/// nothing had changed. It isn't needed for correctness: LSP servers handle
+/// notifications and requests in the order received, so a request sent
+/// after a `didChange` is answered against the changed text. What a sleep
+/// used to paper over is now handled where it matters:
 ///
-/// - **Bundled servers** parse synchronously inside the request handler
-///   (`src/servers/`, tree-sitter), so there is nothing to wait for at all.
-///   They were paying three seconds per command for no reason.
-/// - **A warm server** only has to digest the one document that changed,
-///   which is what the original 3000ms was actually measured against
-///   (several warm servers competing for CPU).
+/// - **unchanged documents** send nothing, so there is nothing to wait for;
+/// - **push diagnostics** wait in the daemon for a publish newer than the
+///   latest edit (`daemon::PUSH_DIAGNOSTICS_WAIT`);
+/// - **a server still catching up** (just started, or just given a change)
+///   answers empty or with an error, which `proxy_request_with_retry`
+///   retries — only in that situation, so a genuinely empty answer from a
+///   warm server comes back immediately.
 ///
-/// The cold-start case is handled where it belongs, in the daemon: see
-/// `daemon.rs::wait_until_indexed`, which polls for readiness under the
-/// per-project create lock so every caller benefits, not just whichever
-/// one happened to spawn the server.
-const BUNDLED_SETTLE_DELAY_MS: u64 = 0;
-const WARM_SETTLE_DELAY_MS: u64 = 3000;
-
+/// The knob remains for a server that turns out to answer stale-but-
+/// non-empty after a change.
 fn settle_delay(language: &str) -> std::time::Duration {
-    let ms = if registry::is_bundled_language(language) {
-        BUNDLED_SETTLE_DELAY_MS
-    } else {
-        WARM_SETTLE_DELAY_MS
-    };
-    std::time::Duration::from_millis(ms)
+    if registry::is_bundled_language(language) {
+        return std::time::Duration::ZERO;
+    }
+    std::time::Duration::from_millis(crate::config::load_config().settle_ms)
 }
 
 use crate::bm25::{is_ignored_dir_name, Bm25Index};
@@ -104,7 +100,7 @@ fn print_dry_run(
 /// server having its binary deleted out from under it mid-session is not a
 /// case worth paying that cost on every call to guard against.
 async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<ManagerClient> {
-    let client = ManagerClient::new();
+    let mut client = ManagerClient::new();
     let project_root = ctx.project_root.to_string_lossy();
     let already_warm = client.is_alive().await
         && client
@@ -126,7 +122,7 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
     };
 
     client.ensure_running().await?;
-    client
+    let info = client
         .create_server(
             &ctx.file_path.to_string_lossy(),
             Some(&ctx.project_root.to_string_lossy()),
@@ -139,7 +135,7 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
     // server rejects a duplicate `didOpen` on an already-open document and
     // silently skips reprocessing it, which starves diagnostics/analysis of
     // ever re-running against the current content on a warm-reuse call.
-    client
+    let changed = client
         .proxy_notify(
             &ctx.project_root.to_string_lossy(),
             Some(&ctx.language),
@@ -154,20 +150,12 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
             }),
         )
         .await?;
-    // Give the server a moment to build its AST after didOpen. Warm reuse
-    // only saves the (usually dominant) process-spawn + `initialize` cost.
-    // The warm figure was chosen empirically: 800ms produced wrong/
-    // unresolved `definition` results under system load; 1500ms was
-    // reliable for a single warm server but still failed once multiple
-    // *different* language servers were warm and running concurrently
-    // (several servers competing for CPU during each other's analysis
-    // passes). 3000ms was reliable in that adversarial case — verified by
-    // `tests/web.rs` running css, html and json commands back-to-back
-    // against three simultaneously-warm servers. See `settle_delay` for
-    // why cold and bundled servers get different numbers.
-    let delay = settle_delay(&ctx.language);
-    if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
+    client.fresh = info.just_started || info.loading || changed;
+    if changed {
+        let delay = settle_delay(&ctx.language);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
     }
     Ok(client)
 }
@@ -210,6 +198,14 @@ async fn proxy_request_with_retry(
     params: Value,
     is_empty: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
+    // A warm server that was given nothing new has nothing to catch up on:
+    // an empty answer from it is the answer. Retrying anyway cost a genuine
+    // "no definition here" 3s of backoff.
+    let max_retries = if client.fresh {
+        MAX_EMPTY_RESULT_RETRIES
+    } else {
+        0
+    };
     let mut attempt = 0;
     loop {
         let outcome = client
@@ -220,7 +216,7 @@ async fn proxy_request_with_retry(
             Ok(v) => is_empty(v),
             Err(_) => true,
         };
-        if !still_warming || attempt >= MAX_EMPTY_RESULT_RETRIES {
+        if !still_warming || attempt >= max_retries {
             return outcome;
         }
 

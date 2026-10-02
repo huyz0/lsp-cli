@@ -172,11 +172,14 @@ CLI matters: a second command arriving mid-cold-start would otherwise see an
 entry that exists, treat it as warm, and query a server that is still
 loading.
 
-It waits in two phases, because "ready" is not one thing:
+It waits in three phases, because "ready" is not one thing:
 
 1. `textDocument/documentSymbol` until the server returns symbols. This is
    answered from the parse alone, so it proves the file has been read —
-   which is all `outline` needs.
+   which is all `outline` needs. A successful *empty* answer ends this
+   phase once the server reports itself idle, or after it has held for
+   3s: a barrel file of re-exports has no symbols, and waiting for some
+   used to cost it the full 60s deadline on every cold start.
 2. `textDocument/hover`, at the first symbol phase 1 found, until the server
    returns *any* result rather than an error. This is the part phase 1 does
    not prove. gopls answers documentSymbol happily while replying to hover
@@ -186,19 +189,68 @@ It waits in two phases, because "ready" is not one thing:
    the reply, not its content: a loading server errors, a ready one returns
    a result (possibly `null`, if there is nothing to say about that
    position), so this also cannot spin on a symbol that has no hover text.
+3. **Project load**, via work-done progress. A cold typescript-language-
+   server answers hover at once but resolves a cross-file definition only
+   as far as the local import binding until it finishes "Initializing
+   JS/TS language features". `initialize` advertises
+   `window.workDoneProgress` (and rust-analyzer's
+   `experimental.serverStatusNotification`), the client tracks open
+   progress tokens, and this phase waits until none are open
+   (`LspClient::is_busy`). A server that reports nothing within 500ms is
+   taken not to report progress at all. This phase is capped at 15s: past
+   that, what remains is usually work navigation rarely needs (rust-
+   analyzer running build scripts and proc-macros via `cargo check`), so
+   the server is handed out flagged `loading`, and the CLI keeps retrying
+   answers that look incomplete.
 
 Servers differ by an order of magnitude in how long that takes, so waiting
 for the observed condition beats any constant sized for the slowest. As a
 backstop, `commands.rs::proxy_request_with_retry` retries a read-only
 request that comes back empty *or* errors, since both are how a server
-signals it is still warming up.
+signals it is still warming up — but only when the session just started
+the server or changed a document. A warm server that was given nothing new
+has nothing to catch up on, and its empty answer is returned immediately.
 
-A **warm** server still gets a fixed `WARM_SETTLE_DELAY_MS` (3000ms) after
-`didOpen`/`didChange`, because a single-document change has no equivalent
-observable completion signal. That number was tuned against several warm
-servers competing for CPU. The bundled servers skip it entirely: they parse
-with tree-sitter synchronously inside the request handler, so there is
-nothing to wait for.
+### Document sync on a warm server
+
+There is no fixed wait after `didOpen`/`didChange` any more. Every warm
+command used to sleep 3000ms, which was about 99% of its wall time even
+when nothing had changed. The daemon now keeps, per server, every open
+document's exact text and on-disk stamp (`LspClient::open_docs`):
+
+- **Unchanged text sends nothing.** `sync_document` compares before
+  sending a `didChange`, and tells the CLI whether anything changed.
+- **Other open files are re-synced from disk before every request**
+  (`resync_from_disk`): one `stat` each, a `didChange` if the content
+  differs, a `didClose` if the file is gone. A file modified in the last
+  2s has its content compared rather than its `(mtime, size)` stamp
+  trusted, since two same-length writes within one timestamp tick share
+  a stamp. For an open document the
+  server's copy overrides the disk, so without this an edit to a file an
+  earlier command had opened was invisible to every later query —
+  definitions pointed at old lines, diagnostics missed new errors, and a
+  rename computed its edits against stale text and `--apply` wrote them
+  at the wrong offsets.
+- **At most 16 documents stay open** per server; the least recently used
+  are closed, and the server reads them from disk like any other file.
+- **Requests need no wait for correctness**: servers handle notifications
+  and requests in order, so a request sent after a `didChange` is answered
+  against the changed text.
+- **Push diagnostics are the exception.** A server that only pushes
+  (typescript-language-server answers pull requests "method not found")
+  publishes on its own schedule, and in stages: syntactic diagnostics
+  first, semantic ones later — and re-publishes a file only when its
+  diagnostics changed. After a change, `diagnostics` waits for a publish
+  newer than the change, then until the file has been quiet for 750ms.
+  The cap is 5s for a file that has never published and 2s for one that
+  has (it will only publish again if something changed), and a completed
+  wait is recorded per file, so a later call with nothing new returns at
+  once rather than waiting for a publish that isn't coming.
+
+`settleMs` in the config adds a pause after a change, as an escape hatch
+for a server that turns out to answer stale-but-non-empty. The bundled
+servers parse with tree-sitter synchronously inside the request handler,
+so they never wait for anything.
 
 ## Automatic language server installation (`src/install.rs`)
 
