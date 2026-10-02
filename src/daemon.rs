@@ -364,17 +364,43 @@ impl Manager {
         // up to the 120s request ceiling) blocked every other project's
         // `/list`, `/create`, and `/request` for as long as it ran. This is
         // the file-watcher path, so it fires on every debounced batch.
-        let targets: Vec<Arc<Mutex<LspClient>>> = {
+        let targets: Vec<(Arc<Mutex<LspClient>>, String)> = {
             let servers = self.servers.lock().await;
             servers
                 .values()
                 .filter(|s| s.info.project_root == project_root && s.info.status == "running")
-                .map(|s| s.client.clone())
+                .map(|s| (s.client.clone(), s.info.language.clone()))
                 .collect()
         };
-        for client in targets {
-            let _ = client.lock().await.notify(method, params.clone()).await;
+        for (client, language) in targets {
+            let mut c = client.lock().await;
+            if c.notify(method, params.clone()).await.is_err() {
+                continue;
+            }
+            // Files changed outside the server's open documents: any
+            // diagnostics it has published may now be out of date.
+            c.mark_external_change();
+            if method == "workspace/didChangeWatchedFiles" {
+                reload_changed_files(&mut c, &language, &params).await;
+            }
         }
+    }
+
+    /// Sends the file changes the watcher is still holding for
+    /// `project_root` to its servers now, rather than when the batch
+    /// window closes. Returns whether there were any.
+    async fn flush_watched_changes(&self, project_root: &str) -> bool {
+        let changes = self.watcher.take_pending(project_root).await;
+        if changes.is_empty() {
+            return false;
+        }
+        self.broadcast_notify(
+            project_root,
+            "workspace/didChangeWatchedFiles",
+            serde_json::json!({ "changes": changes }),
+        )
+        .await;
+        true
     }
 
     /// Sends a request to the (single) running server matching
@@ -398,6 +424,7 @@ impl Manager {
         method: &str,
         params: Value,
     ) -> Result<Value> {
+        self.flush_watched_changes(project_root).await;
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
         // Files edited on disk since the server last saw them, other than
@@ -494,11 +521,12 @@ impl Manager {
         method: &str,
         params: Value,
     ) -> Result<bool> {
+        let flushed = self.flush_watched_changes(project_root).await;
         let client = self.find_running_client(project_root, language).await?;
         let mut c = client.lock().await;
 
         if method == "textDocument/didOpen" {
-            return Self::didopen_as_sync_document(&mut c, &params).await;
+            return Ok(Self::didopen_as_sync_document(&mut c, &params).await? || flushed);
         }
 
         c.notify(method, params).await?;
@@ -737,6 +765,50 @@ fn now_ms() -> i64 {
 /// gopls reports `no package metadata` until its initial load completes,
 /// rust-analyzer takes longer still — so waiting for the observed condition
 /// beats any constant large enough for the slowest of them.
+/// Most changed files `reload_changed_files` will reopen in one batch.
+/// Beyond that (a branch switch, a code generator) the notification alone
+/// has to do.
+const MAX_RELOADS_PER_BATCH: usize = 20;
+
+/// Makes the server re-read files that changed on disk but that it doesn't
+/// have open, by opening and immediately closing each one.
+///
+/// `workspace/didChangeWatchedFiles` is only advice, and
+/// typescript-language-server acts on it slowly or not at all: after an edit
+/// to a file it had never opened, diagnostics of the files that depend on it
+/// stayed stale for many seconds (an error introduced by the edit missing,
+/// then — after reverting — still reported). Closing a document makes a
+/// server drop its copy and read the file from disk, which re-checks
+/// everything that depends on it.
+async fn reload_changed_files(client: &mut LspClient, language: &str, params: &Value) {
+    let Some(lang) = crate::registry::languages()
+        .iter()
+        .find(|l| l.name == language)
+    else {
+        return;
+    };
+    let changed: Vec<std::path::PathBuf> = params["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| matches!(c["type"].as_u64(), Some(1 | 2)))
+        .filter_map(|c| c["uri"].as_str().map(lsp::uri::to_path))
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                lang.extensions
+                    .contains(&format!(".{}", e.to_lowercase()).as_str())
+            })
+        })
+        .collect();
+    if changed.len() > MAX_RELOADS_PER_BATCH {
+        return;
+    }
+    for path in changed {
+        let id = crate::project::language_id(language, &path);
+        let _ = client.reload_from_disk(&path, id).await;
+    }
+}
+
 /// Longest `diagnostics` waits for a server that only pushes diagnostics
 /// to publish a settled set newer than the latest edit. Paid only by a
 /// diagnostics call that follows an edit, and only until the publishes

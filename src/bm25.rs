@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use walkdir::WalkDir;
 
 use crate::protocol::symbol_kind::{
-    CLASS, ENUM, FIELD, FUNCTION, INTERFACE, KEY, METHOD, MODULE, STRUCT,
+    CLASS, ENUM, FIELD, FUNCTION, INTERFACE, KEY, METHOD, MODULE, STRUCT, TYPE_PARAMETER, VARIABLE,
 };
 use crate::protocol::{Location, Position, Range, SymbolInformation};
 
@@ -112,76 +112,89 @@ static PATTERNS: LangPatterns = LangPatterns {
     html: std::sync::OnceLock::new(),
 };
 
+fn re(pattern: &str) -> regex::Regex {
+    regex::Regex::new(pattern).unwrap()
+}
+
+/// Words the declaration-shaped patterns can capture but that are never a
+/// symbol's name: `if (x) {` looks exactly like a method `if()` to a
+/// pattern for TS/Java/C++/C# method shorthand, and was indexed as one.
+const NOT_A_NAME: &[&str] = &[
+    "if", "else", "for", "foreach", "while", "do", "switch", "case", "catch", "try", "finally",
+    "return", "throw", "new", "delete", "typeof", "sizeof", "await", "yield", "with", "using",
+    "lock", "fixed", "when", "match", "select", "function", "class", "struct",
+];
+
 fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
     match ext {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => PATTERNS.ts_js.get_or_init(|| {
+            // `export`, `export default`, `declare`, `abstract` in front of
+            // a declaration were mostly unmatched; so were `enum`, `type`
+            // aliases, `let`/`var`, generator functions, and — the big one —
+            // any method with a return type annotation (`greet(): string {`),
+            // since the method pattern wanted `)` immediately before `{`.
+            let lead = r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?";
             vec![
+                (re(&format!(r"{lead}(?:abstract\s+)?class\s+(\w+)")), CLASS),
+                (re(&format!(r"{lead}interface\s+(\w+)")), INTERFACE),
+                (re(&format!(r"{lead}(?:const\s+)?enum\s+(\w+)")), ENUM),
+                (re(&format!(r"{lead}type\s+(\w+)\s*(?:<[^>]*>)?\s*=")), TYPE_PARAMETER),
+                (re(&format!(r"{lead}(?:async\s+)?function\s*\*?\s*(\w+)")), FUNCTION),
+                (re(&format!(r"{lead}(?:const|let|var)\s+(\w+)\s*[:=]")), VARIABLE),
                 (
-                    regex::Regex::new(r"^\s*(?:export\s+)?class\s+(\w+)").unwrap(),
-                    5,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:export\s+)?interface\s+(\w+)").unwrap(),
-                    11,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)").unwrap(),
-                    12,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:export\s+)?const\s+(\w+)\s*=").unwrap(),
-                    13,
-                ),
-                (
-                    regex::Regex::new(r"^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{").unwrap(),
-                    6,
+                    re(r"^\s+(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?(\w+)\s*(?:<[^>]*>)?\([^)]*\)\s*(?::\s*[^{=;]+)?\{"),
+                    METHOD,
                 ),
             ]
         }),
         "py" | "pyi" => PATTERNS.py.get_or_init(|| {
             vec![
-                (regex::Regex::new(r"^\s*class\s+(\w+)").unwrap(), 5),
-                (regex::Regex::new(r"^\s*def\s+(\w+)").unwrap(), 12),
+                (re(r"^\s*class\s+(\w+)"), CLASS),
+                (re(r"^\s*(?:async\s+)?def\s+(\w+)"), FUNCTION),
             ]
         }),
         "go" => PATTERNS.go.get_or_init(|| {
             vec![
-                (
-                    regex::Regex::new(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)").unwrap(),
-                    12,
-                ),
-                (regex::Regex::new(r"^\s*type\s+(\w+)\s+struct").unwrap(), 23),
+                (re(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)"), FUNCTION),
+                (re(r"^\s*type\s+(\w+)(?:\[[^\]]*\])?\s+struct\b"), STRUCT),
+                (re(r"^\s*type\s+(\w+)(?:\[[^\]]*\])?\s+interface\b"), INTERFACE),
+                (re(r"^\s*type\s+(\w+)\b"), TYPE_PARAMETER),
             ]
         }),
         "rs" => PATTERNS.rs.get_or_init(|| {
+            // `pub(crate)`, `pub(super)`, and `const`/`async`/`unsafe`/
+            // `extern "C"` before `fn` all used to hide a function.
+            let vis = r"^\s*(?:pub(?:\([^)]*\))?\s+)?";
             vec![
-                (regex::Regex::new(r"^\s*(?:pub\s+)?fn\s+(\w+)").unwrap(), 12),
                 (
-                    regex::Regex::new(r"^\s*(?:pub\s+)?struct\s+(\w+)").unwrap(),
-                    23,
+                    re(&format!(r#"{vis}(?:(?:const|async|unsafe|extern(?:\s+"[^"]*")?)\s+)*fn\s+(\w+)"#)),
+                    FUNCTION,
                 ),
-                (
-                    regex::Regex::new(r"^\s*(?:pub\s+)?enum\s+(\w+)").unwrap(),
-                    10,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:pub\s+)?trait\s+(\w+)").unwrap(),
-                    11,
-                ),
+                (re(&format!(r"{vis}struct\s+(\w+)")), STRUCT),
+                (re(&format!(r"{vis}union\s+(\w+)")), STRUCT),
+                (re(&format!(r"{vis}enum\s+(\w+)")), ENUM),
+                (re(&format!(r"{vis}(?:unsafe\s+)?trait\s+(\w+)")), INTERFACE),
+                (re(&format!(r"{vis}type\s+(\w+)")), TYPE_PARAMETER),
+                (re(&format!(r"{vis}mod\s+(\w+)")), MODULE),
+                (re(r"^\s*macro_rules!\s*(\w+)"), FUNCTION),
             ]
         }),
         "java" | "kt" => PATTERNS.java_kt.get_or_init(|| {
+            let mods = r"^\s*(?:(?:public|private|protected|internal|abstract|final|static|sealed|open|data|inner|annotation)\s+)*";
             vec![
+                // Before `class`, so Kotlin's `enum class` is an enum.
+                (re(&format!(r"{mods}enum\s+(?:class\s+)?(\w+)")), ENUM),
+                (re(&format!(r"{mods}(?:class|record|object)\s+(\w+)")), CLASS),
+                (re(&format!(r"{mods}(?:interface|@interface)\s+(\w+)")), INTERFACE),
+                // Kotlin: `fun name(`, `fun <T> name(`, `fun Type.name(`.
                 (
-                    regex::Regex::new(r"^\s*(?:public\s+|private\s+)?class\s+(\w+)").unwrap(),
-                    5,
+                    re(&format!(r"{mods}(?:override\s+|suspend\s+|inline\s+|operator\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.<>, ?*]+\.)?(\w+)\s*\(")),
+                    METHOD,
                 ),
+                // Java: modifiers, a return type (generic, array), the name.
                 (
-                    regex::Regex::new(
-                        r"^\s*(?:public\s+|private\s+)?(?:static\s+)?\w+\s+(\w+)\s*\([^)]*\)\s*\{",
-                    )
-                    .unwrap(),
-                    6,
+                    re(&format!(r"{mods}(?:synchronized\s+|native\s+|default\s+)*(?:<[^>]*>\s+)?[\w.<>\[\],? ]+\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w.,\s]+)?\{{")),
+                    METHOD,
                 ),
             ]
         }),
@@ -242,17 +255,14 @@ fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
             ]
         }),
         "cs" => PATTERNS.csharp.get_or_init(|| {
+            let mods = r"^\s*(?:(?:public|private|protected|internal|abstract|sealed|static|partial|readonly|virtual|override|async|unsafe|new|extern)\s+)*";
             vec![
+                (re(&format!(r"{mods}(?:class|record)\s+(\w+)")), CLASS),
+                (re(&format!(r"{mods}struct\s+(\w+)")), STRUCT),
+                (re(&format!(r"{mods}interface\s+(\w+)")), INTERFACE),
+                (re(&format!(r"{mods}enum\s+(\w+)")), ENUM),
                 (
-                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:abstract\s+|sealed\s+|static\s+)?class\s+(\w+)").unwrap(),
-                    CLASS,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+)?interface\s+(\w+)").unwrap(),
-                    INTERFACE,
-                ),
-                (
-                    regex::Regex::new(r"^\s*(?:public\s+|private\s+|internal\s+|protected\s+)?(?:static\s+|virtual\s+|override\s+|async\s+)?\w+\s+(\w+)\s*\([^)]*\)\s*\{").unwrap(),
+                    re(&format!(r"{mods}[\w.<>\[\],? ]+\s+(\w+)\s*(?:<[^>]*>)?\([^)]*\)\s*(?:where\s+[^{{]+)?\{{")),
                     METHOD,
                 ),
             ]
@@ -308,6 +318,9 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
         for (re, kind) in patterns {
             if let Some(caps) = re.captures(line) {
                 if let Some(m) = caps.get(1) {
+                    if NOT_A_NAME.contains(&m.as_str()) {
+                        continue;
+                    }
                     let name = m.as_str().to_string();
                     let col = m.start() as u32;
                     out.push(SymbolInformation {
@@ -803,6 +816,145 @@ mod tests {
 
     fn names(syms: &[SymbolInformation]) -> Vec<&str> {
         syms.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// `(name, kind)` for every symbol extracted from `src` as `file`.
+    fn extracted(file: &str, src: &str) -> Vec<(String, &'static str)> {
+        extract_symbols(std::path::Path::new(file), src)
+            .iter()
+            .map(|s| (s.name.clone(), crate::protocol::symbol_kind_name(s.kind)))
+            .collect()
+    }
+
+    fn pairs(expected: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
+        expected.iter().map(|(n, k)| (n.to_string(), *k)).collect()
+    }
+
+    /// Exactly what is found, per language, in declaration forms that real
+    /// code uses all the time and the patterns used to miss — and nothing
+    /// that isn't a declaration (`if (x) {` was indexed as a method `if`).
+    #[test]
+    fn typescript_declarations_are_all_found_and_control_flow_is_not() {
+        let src = "\
+export default class App {}
+export abstract class Shape {
+  abstract area(): number;
+  private static async load<T>(id: string): Promise<T> {
+    if (id) {
+      for (const x of []) {}
+    }
+  }
+  get size(): number {
+    return 1;
+  }
+}
+export const enum Color { Red }
+export type UserId = string;
+declare interface Window {}
+export async function* stream() {}
+let counter: number = 0;
+";
+        assert_eq!(
+            extracted("a.ts", src),
+            pairs(&[
+                ("App", "class"),
+                ("Shape", "class"),
+                ("load", "method"),
+                ("size", "method"),
+                ("Color", "enum"),
+                ("UserId", "typeParameter"),
+                ("Window", "interface"),
+                ("stream", "function"),
+                ("counter", "variable"),
+            ])
+        );
+    }
+
+    #[test]
+    fn python_async_functions_are_found() {
+        let src = "class Repo:\n    async def fetch_items(self):\n        pass\n\nasync def main():\n    pass\n";
+        assert_eq!(
+            extracted("a.py", src),
+            pairs(&[
+                ("Repo", "class"),
+                ("fetch_items", "function"),
+                ("main", "function")
+            ])
+        );
+    }
+
+    #[test]
+    fn go_interfaces_and_other_types_are_found() {
+        let src = "type Greeter interface {\n\tGreet() string\n}\ntype ID string\ntype Box[T any] struct{}\nfunc (b *Box[T]) Get() T {}\n";
+        assert_eq!(
+            extracted("a.go", src),
+            pairs(&[
+                ("Greeter", "interface"),
+                ("ID", "typeParameter"),
+                ("Box", "struct"),
+                ("Get", "function"),
+            ])
+        );
+    }
+
+    #[test]
+    fn rust_functions_behind_qualifiers_are_found() {
+        let src = "\
+pub(crate) async fn resync_from_disk() {}
+pub const fn zero() -> u32 { 0 }
+unsafe fn raw() {}
+pub(super) struct Cache;
+pub type Result<T> = std::result::Result<T, Error>;
+mod tests {}
+pub unsafe trait Send2 {}
+macro_rules! bail2 { () => {} }
+impl Cache {}
+";
+        assert_eq!(
+            extracted("a.rs", src),
+            pairs(&[
+                ("resync_from_disk", "function"),
+                ("zero", "function"),
+                ("raw", "function"),
+                ("Cache", "struct"),
+                ("Result", "typeParameter"),
+                ("tests", "module"),
+                ("Send2", "interface"),
+                ("bail2", "function"),
+            ])
+        );
+    }
+
+    #[test]
+    fn java_kotlin_and_csharp_declarations_are_found_and_control_flow_is_not() {
+        let java = "public final class A {\n    public static List<String> names(int n) throws IOException {\n        if (n > 0) {\n        }\n    }\n}\npublic enum Mode { ON }\npublic record Point(int x, int y) {}\n";
+        assert_eq!(
+            extracted("A.java", java),
+            pairs(&[
+                ("A", "class"),
+                ("names", "method"),
+                ("Mode", "enum"),
+                ("Point", "class")
+            ])
+        );
+        let kotlin = "data class User(val name: String)\nobject Registry\nsealed interface Shape\nenum class Color { RED }\nfun <T> List<T>.second(): T = this[1]\nsuspend fun load() {}\n";
+        assert_eq!(
+            extracted("a.kt", kotlin),
+            pairs(&[
+                ("User", "class"),
+                ("Registry", "class"),
+                ("Shape", "interface"),
+                ("Color", "enum"),
+                ("second", "method"),
+                ("load", "method"),
+            ])
+        );
+        let cs = "public sealed partial class Svc\n{\n    public async Task<List<int>> LoadAsync(int id)\n    {\n        while (true) {\n        }\n    }\n}\npublic readonly struct P {}\npublic record Rec(int X);\n";
+        let found = extracted("a.cs", cs);
+        assert!(found.contains(&("Svc".into(), "class")), "{found:?}");
+        assert!(found.contains(&("P".into(), "struct")), "{found:?}");
+        assert!(found.contains(&("Rec".into(), "class")), "{found:?}");
+        assert!(!found.iter().any(|(n, _)| n == "while"), "{found:?}");
     }
 
     #[test]

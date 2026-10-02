@@ -950,11 +950,15 @@ pub async fn run_doc(
     .await?;
 
     if result.is_null() {
-        println!(
-            "{}",
-            fmt.error("No documentation available for this symbol.")
+        // An error like `symbol` and `rename`: a null hover means the
+        // position is not on anything the server knows (a symbol without
+        // docs still gets its signature). It used to print an error-shaped
+        // document with exit 0, which MCP reported as a successful call.
+        bail!(
+            "No hover information at line {}, character {}: the position doesn't resolve to a symbol the server knows. Check it with `lsp locate` using the same --scope/--find.",
+            pos.line + 1,
+            pos.character
         );
-        return Ok(());
     }
     let hover: HoverResult = serde_json::from_value(result)?;
     println!("{}", fmt.hover(&hover));

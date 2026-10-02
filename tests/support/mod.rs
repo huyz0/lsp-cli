@@ -231,8 +231,21 @@ fn lsp_cli_servers_dir() -> PathBuf {
         .join("servers")
 }
 
+/// Whether `bin_name` is available, so a test needing it can run.
+///
+/// A missing server makes the test skip (and pass), which is right on a
+/// developer machine without every server — and silently meaningless in CI.
+/// `LSP_TEST_REQUIRE_SERVERS` (comma-separated binary names, as CI sets for
+/// the servers it installs) turns a skip for one of those into a failure.
 fn has_server(bin_name: &str) -> bool {
-    has_binary(bin_name) || lsp_cli_servers_dir().join(bin_name).exists()
+    let found = has_binary(bin_name) || lsp_cli_servers_dir().join(bin_name).exists();
+    if !found {
+        let required = std::env::var("LSP_TEST_REQUIRE_SERVERS").unwrap_or_default();
+        if required.split(',').any(|r| r.trim() == bin_name) {
+            panic!("{bin_name} is required (LSP_TEST_REQUIRE_SERVERS) but not installed");
+        }
+    }
+    found
 }
 
 pub fn has_ts_server() -> bool {

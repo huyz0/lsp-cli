@@ -276,6 +276,16 @@ document's exact text and on-disk stamp (`LspClient::open_docs`):
   wait is recorded per file, so a later call with nothing new returns at
   once rather than waiting for a publish that isn't coming.
 
+Files a server has *not* opened reach it through the file watcher. Its
+batch is handed over before every request (`WatcherManager::take_pending`)
+rather than when the batch window closes, and each changed file is opened
+and immediately closed in the server (`reload_changed_files`), which makes
+it re-read the file from disk: typescript-language-server otherwise acted
+on `didChangeWatchedFiles` slowly or not at all, so diagnostics right after
+editing an unopened dependency were stale (a new error missing, then a
+fixed one still reported). Any such change also counts as a document
+change for the diagnostics wait.
+
 `settleMs` in the config adds a pause after a change, as an escape hatch
 for a server that turns out to answer stale-but-non-empty. The bundled
 servers parse with tree-sitter synchronously inside the request handler,

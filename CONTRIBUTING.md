@@ -29,6 +29,11 @@ rustup component add rust-analyzer
 cd <this repo>/tests/fixtures/typescript_project && npm install typescript
 ```
 
+Set `LSP_TEST_REQUIRE_SERVERS` to a comma-separated list of server
+binaries (e.g. `typescript-language-server,basedpyright-langserver,gopls`)
+to make the tests that need them fail, rather than skip, when one is
+missing. CI's `test (real language servers)` job does this.
+
 Alternatively, let the tool manage its own copies with `lsp install
 typescript`, `lsp install python`, and so on.
 

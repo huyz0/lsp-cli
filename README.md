@@ -96,7 +96,7 @@ milliseconds. Edits to files on disk are picked up before every query.
 | TypeScript / JavaScript | ✅ | Full support (outline, definition, reference, doc, symbol, calls, diagnostics, search, rename). `hierarchy` (type hierarchy) isn't supported by `typescript-language-server` itself (`textDocument/prepareTypeHierarchy` is unhandled) — the error surfaces cleanly, this isn't a bug in this tool. |
 | Python | ✅ (basedpyright) | Full support except `hierarchy`, which basedpyright doesn't implement (use `reference --mode implementations`). |
 | Go | ✅ (`go install`) | Full support, including `hierarchy`. |
-| Rust | ✅ (GitHub release) | Full support except `hierarchy`, which rust-analyzer doesn't implement (use `reference --mode implementations`). |
+| Rust | ✅ (GitHub release) | Full support except `hierarchy`, which rust-analyzer doesn't implement (use `reference --mode implementations`). `diagnostics` are rust-analyzer's own (type errors and the like), not `cargo check`'s, so some compile errors only `cargo check` reports. |
 | Java | ✅ (Eclipse jdtls release) | Requires a JDK already present (via [sdkman](https://sdkman.io), `$JAVA_HOME`, or `java` on `PATH`); this tool won't install a JDK for you. |
 | Kotlin | ✅ (GitHub release) | Full support. |
 | CSS | ✅ bundled, no install step | Outline (selectors, `@media`/`@keyframes`/`@supports` as nested containers) and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |

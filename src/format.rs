@@ -294,13 +294,6 @@ impl OutputFormat {
         }
     }
 
-    pub fn error(&self, message: &str) -> String {
-        match self {
-            OutputFormat::Json => json!({"kind": "error", "message": message}).to_string(),
-            OutputFormat::Markdown => format!("Error: {message}"),
-        }
-    }
-
     pub fn hierarchy(&self, direction: &str, items: &[TypeHierarchyItem]) -> String {
         match self {
             OutputFormat::Json => json!({

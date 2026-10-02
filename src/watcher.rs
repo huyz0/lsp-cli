@@ -32,6 +32,9 @@ struct WatcherHandle {
     // channel, which ends the debounce task's `recv()` loop naturally. The
     // task itself holds a `Weak`, so it cannot keep the watcher alive.
     _watcher: Arc<Mutex<notify::RecommendedWatcher>>,
+    /// Changes seen but not yet sent, shared with the debounce task so
+    /// `take_pending` can hand them over early. See `take_pending`.
+    pending: Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
 /// How long to wait for the tree to go quiet before flushing a batch.
@@ -173,14 +176,19 @@ impl WatcherManager {
         // and the task would never see the channel close.
         let watcher_ref = Arc::downgrade(&watcher);
 
+        let pending: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        let task_pending = pending.clone();
         tokio::spawn(async move {
-            let mut pending: Vec<Value> = Vec::new();
+            let pending = task_pending;
             // Block for the first event in a batch, then drain anything
             // else that arrives within the debounce window before flushing.
             while let Some(first) = event_rx.recv().await {
                 let flush_by = std::time::Instant::now() + MAX_BATCH_WINDOW;
                 maintain_watches(&watcher_ref, &first).await;
-                pending.extend(to_change(&first, &root, &extensions));
+                pending
+                    .lock()
+                    .unwrap()
+                    .extend(to_change(&first, &root, &extensions));
                 loop {
                     // The debounce window re-arms on every event, so a
                     // continuous stream (a build, an `npm install`) could
@@ -195,14 +203,17 @@ impl WatcherManager {
                     match tokio::time::timeout(window, event_rx.recv()).await {
                         Ok(Some(e)) => {
                             maintain_watches(&watcher_ref, &e).await;
-                            pending.extend(to_change(&e, &root, &extensions));
+                            pending
+                                .lock()
+                                .unwrap()
+                                .extend(to_change(&e, &root, &extensions));
                         }
                         // Quiet for a full debounce window, or the sender
                         // is gone; either way the batch is done.
                         Ok(None) | Err(_) => break,
                     }
                 }
-                let changes = coalesce(std::mem::take(&mut pending));
+                let changes = coalesce(std::mem::take(&mut *pending.lock().unwrap()));
                 if !changes.is_empty() {
                     eprintln!(
                         "[watcher] {} change(s) detected in {root}, notifying live servers",
@@ -218,8 +229,27 @@ impl WatcherManager {
 
         watchers.insert(
             project_root.to_string(),
-            WatcherHandle { _watcher: watcher },
+            WatcherHandle {
+                _watcher: watcher,
+                pending,
+            },
         );
+    }
+
+    /// Hands over (and clears) the changes seen for `project_root` that
+    /// the debounce window is still holding.
+    ///
+    /// A batch waits 100ms to 1s before it is sent, so an agent that edits
+    /// a file and immediately asks for diagnostics used to be answered
+    /// before the server had heard of the edit. The daemon calls this
+    /// before every request, so nothing seen so far is held back.
+    pub async fn take_pending(&self, project_root: &str) -> Vec<Value> {
+        let watchers = self.watchers.lock().await;
+        let Some(handle) = watchers.get(project_root) else {
+            return vec![];
+        };
+        let taken = std::mem::take(&mut *handle.pending.lock().unwrap());
+        coalesce(taken)
     }
 
     pub async fn stop(&self, project_root: &str) {

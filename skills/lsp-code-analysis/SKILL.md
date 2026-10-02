@@ -221,7 +221,13 @@ lsp diagnostics src/service.ts
 ```
 
 Run after editing a file to check it still typechecks, instead of invoking
-the project's build tool. Not every server supports it; the error says so
+the project's build tool. Edits to other files are taken into account,
+including files no command has opened.
+
+For Rust it reports what rust-analyzer checks by itself: syntax and type
+errors such as mismatched types, but not everything `cargo check` does (an
+unresolved method after a rename, borrow-checker errors). Run `cargo check`
+before concluding a Rust change compiles. Not every server supports it; the error says so
 explicitly when the request itself failed. An empty list means no problems
 found, which is not the same as unsupported.
 

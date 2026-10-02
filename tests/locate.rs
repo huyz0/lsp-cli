@@ -37,11 +37,13 @@ fn resolves_a_symbol_path_to_the_declaration_line() {
 fn find_resolves_to_the_matching_line_not_merely_somewhere_nearby() {
     let models = ts_fixture("src/models.ts");
     let source = std::fs::read_to_string(&models).unwrap();
+    // The method itself, not the earlier doc comment "Returns a greeting
+    // message", which contains "greet" only as part of another word.
     let (idx, line) = source
         .lines()
         .enumerate()
-        .find(|(_, l)| l.contains("greet"))
-        .expect("fixture should contain `greet`");
+        .find(|(_, l)| l.contains("greet(): string"))
+        .expect("fixture should declare `greet`");
 
     let data = lsp_json(&["locate", models.to_str().unwrap(), "--find", "greet"]);
     assert_eq!(data["line"], idx as i64 + 1);

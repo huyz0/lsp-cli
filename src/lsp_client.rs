@@ -104,7 +104,12 @@ pub struct LspClient {
 /// continuously also keeps a server that logs a lot from blocking on a
 /// full stderr pipe.
 #[derive(Clone, Default)]
-struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+struct StderrTail {
+    lines: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// Set once the pipe hit end-of-file: everything the server wrote has
+    /// been collected.
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 const STDERR_TAIL_LINES: usize = 40;
 const STDERR_LINE_MAX: usize = 400;
@@ -129,6 +134,8 @@ impl StderrTail {
                 Err(_) => break,
             }
         }
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn push(&self, mut line: String) {
@@ -140,7 +147,7 @@ impl StderrTail {
             line.truncate(cut);
             line.push('…');
         }
-        let mut tail = self.0.lock().unwrap();
+        let mut tail = self.lines.lock().unwrap();
         if tail.len() == STDERR_TAIL_LINES {
             tail.pop_front();
         }
@@ -148,7 +155,7 @@ impl StderrTail {
     }
 
     fn text(&self) -> String {
-        let tail = self.0.lock().unwrap();
+        let tail = self.lines.lock().unwrap();
         tail.iter().cloned().collect::<Vec<_>>().join("\n")
     }
 }
@@ -291,14 +298,32 @@ impl LspClient {
     /// stderr to `err`. Server stderr used to go to /dev/null, so a crash
     /// surfaced as a bare "stdout closed" with no hint of why.
     pub async fn with_stderr_if_dead(&mut self, err: anyhow::Error) -> anyhow::Error {
+        // Its stdout closing is the server going away, but the exit itself
+        // can become observable a moment later; checking liveness at once
+        // raced it and reported a crash as a bare "stdout closed".
+        if matches!(err.downcast_ref::<RpcError>(), Some(RpcError::Closed(_))) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+            while self.is_alive() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
         if self.is_alive() {
             return err;
         }
         if !self.death_reported {
-            // Give the reader task a moment to collect the final lines,
-            // and log them once, not on every later request to this dead
-            // client before it is reaped.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Let the reader task collect the final lines (it sees EOF once
+            // the process is gone; a fixed pause lost them under load), and
+            // log them once, not on every later request to this dead client
+            // before it is reaped.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+            while !self
+                .stderr_tail
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             self.death_reported = true;
             let tail = self.stderr_tail.text();
             if !tail.is_empty() {
@@ -521,9 +546,11 @@ impl LspClient {
             if doc.text == text {
                 false
             } else {
-                doc.version += 1;
-                doc.text = text.to_string();
-                let version = doc.version;
+                let version = doc.version + 1;
+                // Recorded only once sent: a write that fails (or is cut
+                // off) must not leave this client believing the server has
+                // text it never received, which no later resync would
+                // correct.
                 self.notify(
                     "textDocument/didChange",
                     json!({
@@ -532,6 +559,10 @@ impl LspClient {
                     }),
                 )
                 .await?;
+                if let Some(doc) = self.open_docs.get_mut(uri) {
+                    doc.version = version;
+                    doc.text = text.to_string();
+                }
                 true
             }
         } else {
@@ -588,17 +619,22 @@ impl LspClient {
             }
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    doc.stamp = stamp;
                     if text == doc.text {
+                        doc.stamp = stamp;
                         continue;
                     }
-                    doc.version += 1;
-                    doc.text = text;
+                    // Sent first, recorded after (see `sync_document`).
+                    let version = doc.version + 1;
                     let msg = json!({
-                        "textDocument": { "uri": uri, "version": doc.version },
-                        "contentChanges": [{ "text": doc.text }]
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }]
                     });
                     self.notify("textDocument/didChange", msg).await?;
+                    if let Some(doc) = self.open_docs.get_mut(&uri) {
+                        doc.stamp = stamp;
+                        doc.version = version;
+                        doc.text = text;
+                    }
                 }
                 // Deleted (or unreadable): stop overriding it, so the server
                 // goes back to whatever the disk says.
@@ -638,6 +674,44 @@ impl LspClient {
             self.close_document(&oldest).await?;
         }
         Ok(())
+    }
+
+    /// Has the server re-read `path` from disk, if it isn't one of our open
+    /// documents (those are kept current by `resync_from_disk`): a
+    /// `didOpen` with the current content, then a `didClose`, after which
+    /// the server goes back to the file on disk. See
+    /// `daemon::reload_changed_files`.
+    pub async fn reload_from_disk(
+        &mut self,
+        path: &std::path::Path,
+        language_id: &str,
+    ) -> Result<()> {
+        let uri = lsp::uri::from_path(path);
+        if self.open_docs.contains_key(&uri) {
+            return Ok(());
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Ok(());
+        };
+        self.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": language_id, "version": 1, "text": text } }),
+        )
+        .await?;
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": uri } }),
+        )
+        .await?;
+        self.sync_generation += 1;
+        Ok(())
+    }
+
+    /// Records that files changed without this client sending the change
+    /// as a document edit (`workspace/didChangeWatchedFiles`): published
+    /// diagnostics may be stale until the server publishes again.
+    pub fn mark_external_change(&mut self) {
+        self.sync_generation += 1;
     }
 
     /// Number of `publishDiagnostics` received for `uri` so far.

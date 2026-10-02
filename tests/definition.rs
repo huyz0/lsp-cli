@@ -49,17 +49,18 @@ fn definition_of_a_constructor_call_gives_class_and_constructor() {
     );
 }
 
-/// `--find` takes the *first* match in scope: `": <|>User"` lands on
-/// `UserOptions` (models.ts:5), which is the documented behaviour — this
-/// pins it, so the rule an agent relies on can't drift silently.
+/// `--find` prefers a whole identifier in code: `": <|>User"` first
+/// occurs inside `options: UserOptions`, but the match that stands alone is
+/// the return type `): User`. It used to take the first textual match and
+/// resolve `UserOptions` (models.ts:5) instead.
 #[test]
-fn find_uses_the_first_match_in_scope() {
+fn find_prefers_a_whole_identifier_over_a_partial_one() {
     if !has_ts_server() {
         eprintln!("skipping: typescript-language-server not installed");
         return;
     }
     assert_eq!(
         definition(": <|>User"),
-        vec![("models.ts".to_string(), 5, 17)]
+        vec![("models.ts".to_string(), 13, 13)]
     );
 }

@@ -82,3 +82,37 @@ jobs:
           --test help --test install --test locate --test schema
           --test server --test mcp_stdio --test web --test bash_lang
           --test sync_protocol
+
+  # The semantic tests against real language servers. Everywhere else they
+  # skip when the server is missing, which is right on a developer machine
+  # and meant they never ran in CI at all: every pinned definition line,
+  # reference set, outline tree and stale-file scenario protected nothing
+  # here. LSP_TEST_REQUIRE_SERVERS turns a skip into a failure for the
+  # servers this job installs.
+  test-servers:
+    name: test (real language servers)
+    runs-on: ubuntu-latest
+    env:
+      LSP_TEST_REQUIRE_SERVERS: typescript-language-server,basedpyright-langserver,gopls
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: npm install -g typescript-language-server typescript basedpyright
+      - run: |
+          go install golang.org/x/tools/gopls@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: npm install
+        working-directory: tests/fixtures/typescript_project
+      - run: >
+          cargo test --release
+          --test definition --test reference --test outline --test symbol
+          --test doc --test calls --test diagnostics --test search
+          --test doc_sync --test hierarchy --test python --test go_lang
+          --test locate --test install --test watcher

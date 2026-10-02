@@ -486,19 +486,42 @@ fn resolve_position(
     let pattern_without_cursor = find.replace(cursor_marker, "");
     let normalized_pattern = normalize_whitespace(&pattern_without_cursor);
 
+    // Every occurrence in scope, best first. The first textual match used
+    // to win, so `--find User` landed in a "User model" doc comment and
+    // `--find greet` inside the word "greeting", and the command then
+    // asked the server about a comment and answered "nothing" with exit 0.
+    // Preferred: a whole identifier in code, then a partial word in code,
+    // then anything in a comment; earlier lines first within a tier.
+    let mut best: Option<(u8, usize, usize)> = None;
     for i in start_line..=end_line.min(lines.len().saturating_sub(1)) {
         let line = lines.get(i).copied().unwrap_or("");
         let normalized_line = normalize_whitespace(line);
-        if normalized_line.contains(&normalized_pattern) {
-            // `find_character_offset` works in `char` units because the
-            // whitespace-normalization walk it does is naturally
-            // character-oriented; convert at this single exit point.
-            let char_col = find_character_offset(line, &pattern_without_cursor, cursor_idx);
-            return Ok(ResolvedPosition {
-                line: i as u32,
-                character: char_to_utf16_col(line, char_col),
-            });
+        let code_len = normalize_whitespace(code_part(line)).len();
+        for (at, _) in normalized_line.match_indices(normalized_pattern.as_str()) {
+            let in_code = at < code_len;
+            let whole = is_whole_word(&normalized_line, at, normalized_pattern.len());
+            let tier = match (in_code, whole) {
+                (true, true) => 0,
+                (true, false) => 1,
+                (false, _) => 2,
+            };
+            if best.is_none_or(|(t, l, a)| (tier, i, at) < (t, l, a)) {
+                best = Some((tier, i, at));
+            }
         }
+    }
+    if let Some((_, i, at)) = best {
+        let line = lines[i];
+        let normalized_line = normalize_whitespace(line);
+        let start = map_normalized_offset(line, normalized_line[..at].chars().count());
+        // `find_character_offset` works in `char` units because the
+        // whitespace-normalization walk it does is naturally
+        // character-oriented; convert at this single exit point.
+        let char_col = find_character_offset(line, &pattern_without_cursor, cursor_idx, start);
+        return Ok(ResolvedPosition {
+            line: i as u32,
+            character: char_to_utf16_col(line, char_col),
+        });
     }
 
     bail!(
@@ -509,15 +532,34 @@ fn resolve_position(
     );
 }
 
-fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<usize>) -> usize {
+/// Whether the `len` bytes at `at` in `text` stand alone as a word: not
+/// preceded or followed by an identifier character where the pattern itself
+/// begins or ends with one.
+fn is_whole_word(text: &str, at: usize, len: usize) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let found = &text[at..at + len];
+    let before = text[..at].chars().next_back();
+    let after = text[at + len..].chars().next();
+    let starts_ident = found.chars().next().is_some_and(is_ident);
+    let ends_ident = found.chars().next_back().is_some_and(is_ident);
+    !(starts_ident && before.is_some_and(is_ident)) && !(ends_ident && after.is_some_and(is_ident))
+}
+
+/// The `char` column for the cursor, given the match starting at `char`
+/// index `match_start` of `original_line`.
+fn find_character_offset(
+    original_line: &str,
+    pattern: &str,
+    cursor_idx: Option<usize>,
+    match_start: usize,
+) -> usize {
     let orig: Vec<char> = original_line.chars().collect();
     let pat: Vec<char> = pattern.chars().collect();
 
     let Some(cursor_idx) = cursor_idx else {
-        return find_match_start_in_original(original_line, pattern);
+        return match_start;
     };
 
-    let match_start = find_match_start_in_original(original_line, pattern);
     // cursor_idx is a byte index into `find` (before removing marker); pattern is ascii-heavy so
     // approximate by char count up to that byte offset in `pattern`.
     let pattern_before_cursor_chars = pattern[..cursor_idx.min(pattern.len())].chars().count();
@@ -561,17 +603,6 @@ fn find_character_offset(original_line: &str, pattern: &str, cursor_idx: Option<
     }
 
     orig_idx
-}
-
-fn find_match_start_in_original(original_line: &str, pattern: &str) -> usize {
-    let normalized_line = normalize_whitespace(original_line);
-    let normalized_pattern = normalize_whitespace(pattern);
-    let Some(norm_match_start) = normalized_line.find(&normalized_pattern) else {
-        return 0;
-    };
-    // find() gives a byte offset into normalized_line; convert to char offset first
-    let norm_char_offset = normalized_line[..norm_match_start].chars().count();
-    map_normalized_offset(original_line, norm_char_offset)
 }
 
 fn map_normalized_offset(original: &str, normalized_offset: usize) -> usize {
@@ -724,6 +755,49 @@ mod tests {
     #[test]
     fn missing_symbol_is_an_error() {
         assert!(resolve_locate(SAMPLE, Some("DoesNotExist"), None).is_err());
+    }
+
+    // --- --find ranking -----------------------------------------------
+
+    #[test]
+    fn find_prefers_code_over_a_comment_mentioning_the_same_word() {
+        let content = "/**\n * User model.\n */\nexport class User {}\n";
+        let pos = resolve_locate(content, None, Some("User")).unwrap();
+        assert_eq!((pos.line, pos.character), (3, 13));
+    }
+
+    #[test]
+    fn find_prefers_a_whole_word_over_part_of_a_longer_one() {
+        let content = "// say greeting\nfunction greetUser() {}\nuser.greet();\n";
+        let pos = resolve_locate(content, None, Some("greet")).unwrap();
+        assert_eq!((pos.line, pos.character), (2, 5));
+    }
+
+    #[test]
+    fn within_a_line_the_whole_word_occurrence_is_the_one_pointed_at() {
+        // `User` occurs first inside `UserOptions`; the cursor must land on
+        // the standalone one, not merely on the right line.
+        let content = "function f(options: UserOptions): User {}\n";
+        let pos = resolve_locate(content, None, Some(": <|>User")).unwrap();
+        assert_eq!(pos.character, 34);
+    }
+
+    #[test]
+    fn find_still_falls_back_to_a_partial_match_and_then_to_a_comment() {
+        let partial = "function greetUser() {}\n";
+        assert_eq!(
+            resolve_locate(partial, None, Some("greet"))
+                .unwrap()
+                .character,
+            9
+        );
+        let comment_only = "// TODO: frobnicate\nlet x = 1;\n";
+        assert_eq!(
+            resolve_locate(comment_only, None, Some("frobnicate"))
+                .unwrap()
+                .line,
+            0
+        );
     }
 
     // --- scope bounds -------------------------------------------------

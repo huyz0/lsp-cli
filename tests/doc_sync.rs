@@ -214,3 +214,51 @@ fn a_tsx_file_is_parsed_as_tsx() {
         "valid TSX reported as broken: {errors:?}"
     );
 }
+
+/// The core agent loop: edit a file, then ask whether things still compile.
+/// When the edited file was one the server had never opened, the change
+/// reached it only through the file watcher, whose batch is held for up to
+/// a second — and the cached diagnostics counted as current, so the answer
+/// came back instantly and wrong (no error), then stayed wrong after the
+/// edit was reverted.
+#[test]
+fn diagnostics_right_after_editing_an_unopened_dependency_are_current() {
+    if !has_ts_server() {
+        eprintln!("skipping: typescript-language-server not installed");
+        return;
+    }
+    let project = ts_project_copy();
+    let models = project.path().join("src/models.ts");
+    let service = project.path().join("src/service.ts");
+    let errors = |data: &serde_json::Value| -> Vec<String> {
+        data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["severity"] == "error")
+            .map(|d| d["message"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let clean = lsp_json(&["diagnostics", service.to_str().unwrap()]);
+    assert!(errors(&clean).is_empty(), "{clean}");
+
+    // models.ts has never been opened by any command.
+    let original = std::fs::read_to_string(&models).unwrap();
+    std::fs::write(
+        &models,
+        original.replace("greet(): string", "greet2(): string"),
+    )
+    .unwrap();
+    let broken = lsp_json(&["diagnostics", service.to_str().unwrap()]);
+    assert!(
+        errors(&broken).iter().any(|m| m.contains("greet")),
+        "the edit to models.ts was not seen: {broken}"
+    );
+
+    std::fs::write(&models, &original).unwrap();
+    let fixed = lsp_json(&["diagnostics", service.to_str().unwrap()]);
+    assert!(
+        errors(&fixed).is_empty(),
+        "the revert was not seen: {fixed}"
+    );
+}
