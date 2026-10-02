@@ -65,7 +65,8 @@ lsp outline src/models.ts                    # file structure, no full read need
 lsp definition src/service.ts --scope createUser
 lsp reference src/models.ts --scope User
 lsp calls src/service.ts --scope createUser   # who calls this / what does this call
-lsp hierarchy src/models.ts --scope User      # what extends/implements this
+lsp hierarchy models.go --scope Greeter       # what implements this (servers that support it, e.g. gopls)
+lsp reference src/models.ts --scope Shape --mode implementations  # the same, on any server
 lsp diagnostics src/service.ts                # compiler/type errors
 lsp search "User" --kinds class               # find a symbol workspace-wide
 lsp rename src/models.ts --scope User.greet --new-name sayHello --apply  # rename across every file
@@ -93,9 +94,9 @@ milliseconds. Edits to files on disk are picked up before every query.
 | Language | Auto-install | Notes |
 |---|---|---|
 | TypeScript / JavaScript | ✅ | Full support (outline, definition, reference, doc, symbol, calls, diagnostics, search, rename). `hierarchy` (type hierarchy) isn't supported by `typescript-language-server` itself (`textDocument/prepareTypeHierarchy` is unhandled) — the error surfaces cleanly, this isn't a bug in this tool. |
-| Python | ✅ (basedpyright) | Full support. |
-| Go | ✅ (`go install`) | Full support. |
-| Rust | ✅ (GitHub release) | Full support. |
+| Python | ✅ (basedpyright) | Full support except `hierarchy`, which basedpyright doesn't implement (use `reference --mode implementations`). |
+| Go | ✅ (`go install`) | Full support, including `hierarchy`. |
+| Rust | ✅ (GitHub release) | Full support except `hierarchy`, which rust-analyzer doesn't implement (use `reference --mode implementations`). |
 | Java | ✅ (Eclipse jdtls release) | Requires a JDK already present (via [sdkman](https://sdkman.io), `$JAVA_HOME`, or `java` on `PATH`); this tool won't install a JDK for you. |
 | Kotlin | ✅ (GitHub release) | Full support. |
 | CSS | ✅ bundled, no install step | Outline (selectors, `@media`/`@keyframes`/`@supports` as nested containers) and hover, no separate download or npm install: it's a Rust-native server built into `lsp` itself (see [docs/architecture.md](docs/architecture.md#bundled-rust-native-servers)). |

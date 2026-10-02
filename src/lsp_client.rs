@@ -82,6 +82,10 @@ pub struct LspClient {
     diagnostics_waited: std::collections::HashMap<String, u64>,
     /// Monotonic use counter for least-recently-used eviction.
     use_clock: u64,
+    /// See `StderrTail`.
+    stderr_tail: StderrTail,
+    /// Whether this client's death has been logged already.
+    death_reported: bool,
     /// Work-done progress the server has begun and not yet ended (tokens
     /// rendered as strings). Servers report project loading this way —
     /// typescript-language-server's "Initializing JS/TS language features",
@@ -93,6 +97,60 @@ pub struct LspClient {
     saw_progress: bool,
     /// rust-analyzer's `experimental/serverStatus` `quiescent` flag.
     quiescent: Option<bool>,
+}
+
+/// The last lines a server wrote to stderr: kept so a crash can be
+/// explained, bounded so a chatty server can't grow it. Reading the pipe
+/// continuously also keeps a server that logs a lot from blocking on a
+/// full stderr pipe.
+#[derive(Clone, Default)]
+struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+const STDERR_TAIL_LINES: usize = 40;
+const STDERR_LINE_MAX: usize = 400;
+
+impl StderrTail {
+    async fn collect(self, stderr: tokio::process::ChildStderr) {
+        use tokio::io::AsyncBufReadExt;
+        // Bytes, decoded lossily: a server may log a Latin-1 path or raw
+        // file content, and `lines()` gives up on the first line that isn't
+        // UTF-8 — after which nobody reads the pipe and the server's own
+        // writes to stderr start failing.
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
+                    self.push(line.trim_end_matches(['\n', '\r']).to_string());
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn push(&self, mut line: String) {
+        if line.len() > STDERR_LINE_MAX {
+            let mut cut = STDERR_LINE_MAX;
+            while !line.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            line.truncate(cut);
+            line.push('…');
+        }
+        let mut tail = self.0.lock().unwrap();
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+
+    fn text(&self) -> String {
+        let tail = self.0.lock().unwrap();
+        tail.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
 }
 
 /// A document open in the server.
@@ -143,7 +201,7 @@ impl LspClient {
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             // Belt-and-suspenders cleanup: without this, dropping an LspClient
             // on an error path (any `?` before shutdown() runs — see
             // commands.rs) leaves the child running unless it happens to
@@ -157,6 +215,10 @@ impl LspClient {
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let stderr_tail = StderrTail::default();
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(stderr_tail.clone().collect(stderr));
+        }
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(read_loop(stdout, tx));
@@ -168,6 +230,8 @@ impl LspClient {
             incoming: rx,
             diagnostics: std::collections::HashMap::new(),
             open_docs: std::collections::HashMap::new(),
+            stderr_tail,
+            death_reported: false,
             sync_generation: 0,
             diagnostics_generation: std::collections::HashMap::new(),
             diagnostics_publishes: std::collections::HashMap::new(),
@@ -211,12 +275,42 @@ impl LspClient {
         // every notification/server-request received, so a chatty-but-stuck
         // server could otherwise hang a command forever) and independent of
         // the ContentModified retry loop below.
-        tokio::time::timeout(
+        let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             self.request_inner(method, params),
         )
         .await
-        .map_err(|_| anyhow!("`{method}` did not complete within 120s"))?
+        .map_err(|_| anyhow!("`{method}` did not complete within 120s"))?;
+        match outcome {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.with_stderr_if_dead(e).await),
+        }
+    }
+
+    /// If the server has died, attaches the last of what it printed to
+    /// stderr to `err`. Server stderr used to go to /dev/null, so a crash
+    /// surfaced as a bare "stdout closed" with no hint of why.
+    pub async fn with_stderr_if_dead(&mut self, err: anyhow::Error) -> anyhow::Error {
+        if self.is_alive() {
+            return err;
+        }
+        if !self.death_reported {
+            // Give the reader task a moment to collect the final lines,
+            // and log them once, not on every later request to this dead
+            // client before it is reaped.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.death_reported = true;
+            let tail = self.stderr_tail.text();
+            if !tail.is_empty() {
+                eprintln!("[daemon] language server exited; its last output:\n{tail}");
+            }
+        }
+        let tail = self.stderr_tail.text();
+        if tail.is_empty() {
+            anyhow!("{err} (the language server exited)")
+        } else {
+            anyhow!("{err}\nThe language server exited. Its last output:\n{tail}")
+        }
     }
 
     async fn request_inner(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -781,6 +875,28 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stderr_tail_keeps_only_the_last_lines_and_caps_their_length() {
+        let tail = StderrTail::default();
+        for i in 0..100 {
+            tail.push(format!("line {i}"));
+        }
+        let text = tail.text();
+        assert_eq!(text.lines().count(), STDERR_TAIL_LINES);
+        assert!(
+            text.starts_with("line 60\n") && text.ends_with("line 99"),
+            "{text}"
+        );
+        tail.push("é".repeat(1000));
+        let last = tail.text().lines().last().unwrap().to_string();
+        assert!(
+            last.len() <= STDERR_LINE_MAX + '…'.len_utf8(),
+            "{}",
+            last.len()
+        );
+        assert!(last.ends_with('…'));
+    }
 
     #[test]
     fn server_requests_are_recognized_with_string_or_numeric_ids() {

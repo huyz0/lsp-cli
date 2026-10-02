@@ -35,9 +35,11 @@ fn definition_follows_cross_file_reference() {
         "return <|>User",
     ]);
     assert_eq!(data["kind"], "definition");
-    let locations = data["locations"].as_array().unwrap();
-    assert!(!locations.is_empty());
-    assert!(locations[0]["uri"].as_str().unwrap().contains("models.go"));
+    // `type User struct` at models.go:5, name at character 5.
+    assert_eq!(
+        support::locations(&data),
+        vec![("models.go".to_string(), 5, 5)]
+    );
 }
 
 #[test]
@@ -49,7 +51,15 @@ fn doc_returns_hover_for_struct() {
     let models = go_fixture("models.go");
     let data = lsp_json(&["doc", models.to_str().unwrap(), "--scope", "User"]);
     assert_eq!(data["kind"], "hover");
-    assert!(data["content"].as_str().unwrap().contains("User"));
+    // The hover must be about *this* symbol: its signature and its own doc
+    // comment. Checking for non-empty content (or the symbol's name, which
+    // nearly any hover nearby contains) let a hover on the wrong symbol pass.
+    let content = data["content"].as_str().unwrap();
+    assert!(content.contains("type User struct"), "{content}");
+    assert!(
+        content.contains("User represents a user in the system."),
+        "{content}"
+    );
 }
 
 #[test]

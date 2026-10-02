@@ -10,7 +10,18 @@ fn returns_hover_doc_for_documented_method() {
     let models = ts_fixture("src/models.ts");
     let data = lsp_json(&["doc", models.to_str().unwrap(), "--scope", "User.greet"]);
     assert_eq!(data["kind"], "hover");
-    assert!(!data["content"].as_str().unwrap().is_empty());
+    // The hover must be about *this* symbol: its signature and its own doc
+    // comment. Checking for non-empty content (or the symbol's name, which
+    // nearly any hover nearby contains) let a hover on the wrong symbol pass.
+    let content = data["content"].as_str().unwrap();
+    assert!(
+        content.contains("(method) User.greet(): string"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Returns a greeting message for the user."),
+        "{content}"
+    );
 }
 
 #[test]
@@ -22,7 +33,12 @@ fn returns_type_info_for_class() {
     let models = ts_fixture("src/models.ts");
     let data = lsp_json(&["doc", models.to_str().unwrap(), "--scope", "User"]);
     assert_eq!(data["kind"], "hover");
-    assert!(data["content"].as_str().unwrap().contains("User"));
+    let content = data["content"].as_str().unwrap();
+    assert!(content.contains("class User"), "{content}");
+    assert!(
+        content.contains("Represents a user in the system."),
+        "{content}"
+    );
 }
 
 #[test]
@@ -53,7 +69,15 @@ fn returns_doc_for_function_in_service() {
     let service = ts_fixture("src/service.ts");
     let data = lsp_json(&["doc", service.to_str().unwrap(), "--scope", "createUser"]);
     assert_eq!(data["kind"], "hover");
-    assert!(!data["content"].as_str().unwrap().is_empty());
+    let content = data["content"].as_str().unwrap();
+    assert!(
+        content.contains("function createUser(options: UserOptions): User"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Creates a new User instance."),
+        "{content}"
+    );
 }
 
 #[test]

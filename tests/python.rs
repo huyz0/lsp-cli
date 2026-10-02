@@ -35,9 +35,12 @@ fn definition_follows_cross_file_import() {
         "<|>User(",
     ]);
     assert_eq!(data["kind"], "definition");
-    let locations = data["locations"].as_array().unwrap();
-    assert!(!locations.is_empty());
-    assert!(locations[0]["uri"].as_str().unwrap().contains("models.py"));
+    // `class User` at models.py:8, name at character 6 — not merely "some
+    // location in models.py".
+    assert_eq!(
+        support::locations(&data),
+        vec![("models.py".to_string(), 8, 6)]
+    );
 }
 
 #[test]
@@ -72,7 +75,15 @@ fn doc_returns_hover_for_method() {
     let models = py_fixture("src/models.py");
     let data = lsp_json(&["doc", models.to_str().unwrap(), "--scope", "User.greet"]);
     assert_eq!(data["kind"], "hover");
-    assert!(!data["content"].as_str().unwrap().is_empty());
+    // The hover must be about *this* symbol: its signature and its own doc
+    // comment. Checking for non-empty content (or the symbol's name, which
+    // nearly any hover nearby contains) let a hover on the wrong symbol pass.
+    let content = data["content"].as_str().unwrap();
+    assert!(content.contains("def greet(self"), "{content}");
+    assert!(
+        content.contains("Returns a greeting message for the user."),
+        "{content}"
+    );
 }
 
 #[test]

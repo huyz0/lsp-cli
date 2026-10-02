@@ -78,8 +78,33 @@ impl ManagerClient {
     /// also spawning. `start_daemon` also independently connect-checks the
     /// socket before touching it, as defense in depth.
     pub async fn ensure_running(&self) -> Result<()> {
-        if self.is_alive().await {
-            return Ok(());
+        match raw_exchange("GET", "/list", None).await {
+            Ok((_, _, build))
+                if !crate::paths::is_older_build(build.as_deref(), crate::paths::build_id()) =>
+            {
+                return Ok(())
+            }
+            // A daemon from an older build of `lsp` (before an upgrade or a
+            // rebuild) would keep serving with its old code for as long as
+            // it had servers to keep it alive. Replace it.
+            Ok((_, _, build)) => {
+                eprintln!(
+                    "[lsp] restarting the background daemon: it is from an older build of lsp ({}, this is {})",
+                    build.as_deref().unwrap_or("unknown"),
+                    crate::paths::build_id()
+                );
+                // Conditional on the build we saw: with several commands
+                // starting at once, a sibling may already have replaced the
+                // old daemon, and an unconditional shutdown would kill the
+                // new one under it.
+                let body = serde_json::json!({ "if_build": build }).to_string();
+                let _ = raw_request_once("POST", "/shutdown", Some(&body)).await;
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while socket_path().exists() && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
+                }
+            }
+            Err(_) => {}
         }
 
         // Checked before spawning rather than after waiting: an unbindable
@@ -269,6 +294,11 @@ impl ManagerClient {
         let body = serde_json::json!({ "project_root": project_root, "language": language, "method": method, "params": params }).to_string();
         let (status, resp) = raw_request("POST", "/request", Some(body)).await?;
         if status != 200 {
+            if resp.starts_with("LSP error -32601") {
+                return Err(anyhow!(Unsupported(unsupported_message(
+                    language, method, &resp
+                ))));
+            }
             bail!("{resp}");
         }
         Ok(serde_json::from_str(&resp)?)
@@ -341,6 +371,19 @@ async fn raw_request(method: &str, path: &str, body: Option<String>) -> Result<(
 }
 
 async fn raw_request_once(method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
+    raw_exchange(method, path, body)
+        .await
+        .map(|(status, body, _)| (status, body))
+}
+
+/// One HTTP exchange with the daemon: status, body, and the daemon's
+/// build id from the response headers (absent from daemons that predate
+/// it).
+async fn raw_exchange(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<(u16, String, Option<String>)> {
     let sock = socket_path();
     let mut stream = UnixStream::connect(&sock)
         .await
@@ -371,8 +414,14 @@ async fn raw_request_once(method: &str, path: &str, body: Option<&str>) -> Resul
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| anyhow!("malformed HTTP response from daemon"))?;
+    let build = head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(crate::paths::BUILD_HEADER)
+            .then(|| value.trim().to_string())
+    });
 
-    Ok((status, resp_body))
+    Ok((status, resp_body, build))
 }
 
 #[cfg(test)]
@@ -420,5 +469,58 @@ mod tests {
         // as "still locked" would deadlock every future spawn attempt.
         let dir = tempfile::tempdir().unwrap();
         assert!(spawn_lock_is_stale(&dir.path().join("does-not-exist.lock")));
+    }
+}
+
+/// A request the language server doesn't implement (JSON-RPC
+/// MethodNotFound). Distinguished so callers don't retry it as if the
+/// server were still warming up.
+#[derive(Debug)]
+pub struct Unsupported(pub String);
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// "The python language server does not support textDocument/
+/// prepareTypeHierarchy" rather than the raw `LSP error -32601: Unhandled
+/// method ...`, plus what to use instead where there is an alternative.
+fn unsupported_message(language: Option<&str>, method: &str, raw: &str) -> String {
+    let server = language.map_or("language".to_string(), |l| format!("{l} language"));
+    let hint = match method {
+        "textDocument/prepareTypeHierarchy" | "typeHierarchy/supertypes" | "typeHierarchy/subtypes" => {
+            "\nFor what implements an interface or extends a type, try `lsp reference <file> --scope <Type> --mode implementations`."
+        }
+        "textDocument/prepareCallHierarchy" => {
+            "\nTo find callers, `lsp reference` lists every usage instead."
+        }
+        _ => "",
+    };
+    format!("The {server} server does not support `{method}` ({raw}).{hint}")
+}
+
+#[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn method_not_found_is_explained_with_an_alternative() {
+        let m = unsupported_message(
+            Some("python"),
+            "textDocument/prepareTypeHierarchy",
+            "LSP error -32601: Unhandled method",
+        );
+        assert!(
+            m.starts_with(
+                "The python language server does not support `textDocument/prepareTypeHierarchy`"
+            ),
+            "{m}"
+        );
+        assert!(m.contains("--mode implementations"), "{m}");
+        assert!(!unsupported_message(None, "textDocument/hover", "x").contains("\n"));
     }
 }

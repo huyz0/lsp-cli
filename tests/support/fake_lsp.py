@@ -15,6 +15,8 @@ which reach it from the test via CLI -> daemon -> server inheritance:
                          hover begins, so a test can wait for it instead of
                          guessing with sleeps
   FAKE_LSP_LOG           file to append every received method name to
+  FAKE_LSP_CRASH_ON_HOVER  if set, a hover past line 0 writes its value to
+                         stderr and exits with status 3, like a crash
   FAKE_LSP_FLAT_SYMBOLS  if set, answer documentSymbol with the flat
                          SymbolInformation[] shape instead of DocumentSymbol[]
 
@@ -156,6 +158,14 @@ while True:
             continue
     elif method == "textDocument/hover":
         line = params["position"]["line"]
+        crash = os.environ.get("FAKE_LSP_CRASH_ON_HOVER")
+        if crash and line > 0:
+            # A line that isn't UTF-8 first: the reader must survive it to
+            # see the last words after it.
+            sys.stderr.buffer.write(b"fake-lsp: path \xff\xfe latin-1\n")
+            sys.stderr.write("fake-lsp: starting hover\n" + crash + "\n")
+            sys.stderr.flush()
+            sys.exit(3)
         if line > 0:
             marker_dir = os.environ.get("FAKE_LSP_MARKER_DIR")
             if marker_dir:

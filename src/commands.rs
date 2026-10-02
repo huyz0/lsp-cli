@@ -46,9 +46,10 @@ use crate::locate::resolve_locate;
 use crate::manager_client::ManagerClient;
 use crate::project::{language_id, resolve_project, ProjectContext};
 use crate::protocol::{
-    symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyOutgoingCall, DocumentChangeOp,
-    DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location, LocationOrMany,
-    SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit, ALL_SYMBOL_KIND_IDS,
+    symbol_kind_name, CallEntry, CallHierarchyIncomingCall, CallHierarchyOutgoingCall,
+    DocumentChangeOp, DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location,
+    LocationOrMany, SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit,
+    ALL_SYMBOL_KIND_IDS,
 };
 use crate::registry;
 use crate::{CallDirection, DefinitionMode, HierarchyDirection, ReferenceMode};
@@ -101,18 +102,20 @@ fn print_dry_run(
 async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<ManagerClient> {
     let mut client = ManagerClient::new();
     let project_root = ctx.project_root.to_string_lossy();
-    let already_warm = client.is_alive().await
-        && client
-            .list_servers()
-            .await
-            .map(|servers| {
-                servers.iter().any(|s| {
-                    s.project_root == project_root
-                        && s.language == ctx.language
-                        && s.status == "running"
-                })
+    // First, so the warm-server check below (and everything after it) talks
+    // to a daemon of this build, not one an upgrade left behind.
+    client.ensure_running().await?;
+    let already_warm = client
+        .list_servers()
+        .await
+        .map(|servers| {
+            servers.iter().any(|s| {
+                s.project_root == project_root
+                    && s.language == ctx.language
+                    && s.status == "running"
             })
-            .unwrap_or(false);
+        })
+        .unwrap_or(false);
 
     let server_bin = if already_warm {
         None
@@ -120,7 +123,6 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
         crate::install::ensure_installed(&ctx.language).await?
     };
 
-    client.ensure_running().await?;
     let info = client
         .create_server(
             &ctx.file_path.to_string_lossy(),
@@ -187,9 +189,10 @@ const RETRY_BACKOFF_MS: u64 = 500;
 /// type information is still missing. Outline works, hover does not.
 ///
 /// Retrying is safe because every request routed through here is read-only
-/// and idempotent. A genuinely failing request (an unsupported method, say)
-/// costs the full backoff before surfacing, which is the price of not
-/// string-matching server-specific error text to guess what is transient.
+/// and idempotent. A method the server doesn't implement (`Unsupported`) is
+/// never retried; any other failure on a fresh session costs the backoff
+/// before surfacing, the price of not guessing from server-specific error
+/// text what is transient.
 async fn proxy_request_with_retry(
     client: &ManagerClient,
     project_root: &str,
@@ -214,7 +217,10 @@ async fn proxy_request_with_retry(
 
         let still_warming = match &outcome {
             Ok(v) => is_empty(v),
-            Err(_) => true,
+            // "Not implemented" won't change by asking again.
+            Err(e) => e
+                .downcast_ref::<crate::manager_client::Unsupported>()
+                .is_none(),
         };
         if !still_warming || attempt >= max_retries {
             return outcome;
@@ -306,7 +312,8 @@ pub async fn run_outline(
         )
         .await?;
 
-    let symbols = decode_document_symbols(result)?;
+    let mut symbols = decode_document_symbols(result)?;
+    sort_by_position(&mut symbols);
     let filtered = if all {
         symbols
     } else {
@@ -429,7 +436,14 @@ pub async fn run_calls(
             )
             .await?;
         let calls: Vec<CallHierarchyIncomingCall> = decode_list(result, "incomingCalls")?;
-        calls.into_iter().map(|c| c.from).collect::<Vec<_>>()
+        calls
+            .into_iter()
+            .map(|c| CallEntry {
+                sites_uri: c.from.uri.clone(),
+                item: c.from,
+                sites: c.from_ranges,
+            })
+            .collect::<Vec<_>>()
     } else {
         let result = client
             .proxy_request(
@@ -440,7 +454,22 @@ pub async fn run_calls(
             )
             .await?;
         let calls: Vec<CallHierarchyOutgoingCall> = decode_list(result, "outgoingCalls")?;
-        calls.into_iter().map(|c| c.to).collect::<Vec<_>>()
+        // Outgoing `fromRanges` are relative to the item asked about, which
+        // need not be in the queried file (`--find` on a call to a function
+        // declared elsewhere).
+        let caller_uri = root_json
+            .get("uri")
+            .and_then(|u| u.as_str())
+            .unwrap_or(&ctx.uri)
+            .to_string();
+        calls
+            .into_iter()
+            .map(|c| CallEntry {
+                item: c.to,
+                sites_uri: caller_uri.clone(),
+                sites: c.from_ranges,
+            })
+            .collect::<Vec<_>>()
     };
 
     println!("{}", fmt.calls(direction.as_str(), &items));
@@ -730,6 +759,22 @@ pub async fn run_rename(
     Ok(())
 }
 
+/// Puts symbols, and their children, in source order.
+///
+/// typescript-language-server returns tsserver's navigation tree, which is
+/// sorted *alphabetically* — `User` before `UserOptions` five lines above
+/// it, a class's members as constructor, email, greet, name, toString. An
+/// outline is read top to bottom against the file. Servers that already
+/// answer in source order are unaffected.
+fn sort_by_position(symbols: &mut [DocumentSymbol]) {
+    symbols.sort_by_key(|s| (s.range.start.line, s.range.start.character));
+    for s in symbols.iter_mut() {
+        if let Some(children) = s.children.as_mut() {
+            sort_by_position(children);
+        }
+    }
+}
+
 fn filter_top_level(symbols: Vec<DocumentSymbol>) -> Vec<DocumentSymbol> {
     use crate::protocol::symbol_kind::{
         CLASS, CONSTRUCTOR, ENUM, FUNCTION, INTERFACE, METHOD, MODULE, NAMESPACE, PROPERTY, STRUCT,
@@ -970,7 +1015,16 @@ pub async fn run_symbol(
     let end = (target.range.end.line as usize + 1).min(lines.len());
     let start = (target.range.start.line as usize).min(end);
     let source = lines[start..end].join("\n");
-    println!("{}", fmt.symbol_source(&target.name, target.kind, &source));
+    println!(
+        "{}",
+        fmt.symbol_source(
+            &target.name,
+            target.kind,
+            &ctx.file_path,
+            (start + 1, end),
+            &source
+        )
+    );
     Ok(())
 }
 
@@ -1182,9 +1236,9 @@ fn search_root(project: Option<&str>) -> Result<String> {
 /// navigation command has warmed a server for the project, search uses it.
 async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInformation>> {
     let client = ManagerClient::new();
-    if !client.is_alive().await {
-        return Ok(vec![]);
-    }
+    // Starts the daemon if needed (BM25 lives there too) and replaces one
+    // from an older build before anything is asked of it.
+    client.ensure_running().await?;
     let warm: Vec<String> = client
         .list_servers()
         .await?

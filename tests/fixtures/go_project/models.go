@@ -16,3 +16,8 @@ func (u User) Greet() string {
 func (u User) String() string {
 	return "User(" + u.Name + ")"
 }
+
+// Greeter is anything that can greet.
+type Greeter interface {
+	Greet() string
+}

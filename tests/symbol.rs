@@ -1,46 +1,63 @@
 mod support;
 use support::{has_ts_server, lsp, lsp_json, ts_fixture};
 
-#[test]
-fn returns_full_source_of_a_class() {
-    if !has_ts_server() {
-        eprintln!("skipping: typescript-language-server not installed");
-        return;
-    }
-    let models = ts_fixture("src/models.ts");
-    let data = lsp_json(&["symbol", models.to_str().unwrap(), "--scope", "User"]);
+/// Asserts `symbol` returns exactly lines `first..=last` (1-based) of
+/// `file`, says so in `line`/`endLine`, and names the file. The old tests
+/// checked that the source contained a word or two, so an off-by-one slice
+/// (or the whole file) passed.
+fn assert_symbol(file: &str, scope: &str, name: &str, kind: &str, first: u64, last: u64) {
+    let path = ts_fixture(file);
+    let data = lsp_json(&["symbol", path.to_str().unwrap(), "--scope", scope]);
     assert_eq!(data["kind"], "symbol");
-    assert_eq!(data["name"], "User");
-    assert_eq!(data["symbolKind"], "class");
-    let source = data["source"].as_str().unwrap();
-    assert!(source.contains("greet"));
-    assert!(source.contains("constructor"));
+    assert_eq!(data["name"], name, "{data}");
+    assert_eq!(data["symbolKind"], kind, "{data}");
+    assert_eq!(
+        (data["line"].as_u64(), data["endLine"].as_u64()),
+        (Some(first), Some(last)),
+        "{data}"
+    );
+    assert_eq!(data["uri"], path.canonicalize().unwrap().to_str().unwrap());
+    let text = std::fs::read_to_string(&path).unwrap();
+    let expected: Vec<&str> = text
+        .split('\n')
+        .skip(first as usize - 1)
+        .take((last - first + 1) as usize)
+        .collect();
+    assert_eq!(data["source"], expected.join("\n"));
 }
 
 #[test]
-fn returns_full_source_of_a_method_via_nested_scope() {
+fn returns_exactly_the_source_of_a_class() {
     if !has_ts_server() {
         eprintln!("skipping: typescript-language-server not installed");
         return;
     }
-    let models = ts_fixture("src/models.ts");
-    let data = lsp_json(&["symbol", models.to_str().unwrap(), "--scope", "User.greet"]);
-    assert_eq!(data["kind"], "symbol");
-    assert_eq!(data["name"], "greet");
-    assert!(data["source"].as_str().unwrap().contains("Hello"));
+    assert_symbol("src/models.ts", "User", "User", "class", 13, 35);
 }
 
 #[test]
-fn returns_source_of_top_level_function() {
+fn returns_exactly_the_source_of_a_method_via_nested_scope() {
     if !has_ts_server() {
         eprintln!("skipping: typescript-language-server not installed");
         return;
     }
-    let service = ts_fixture("src/service.ts");
-    let data = lsp_json(&["symbol", service.to_str().unwrap(), "--scope", "createUser"]);
-    assert_eq!(data["kind"], "symbol");
-    assert_eq!(data["name"], "createUser");
-    assert!(data["source"].as_str().unwrap().contains("new User"));
+    assert_symbol("src/models.ts", "User.greet", "greet", "method", 25, 27);
+}
+
+#[test]
+fn returns_exactly_the_source_of_a_top_level_function() {
+    if !has_ts_server() {
+        eprintln!("skipping: typescript-language-server not installed");
+        return;
+    }
+    assert_symbol(
+        "src/service.ts",
+        "createUser",
+        "createUser",
+        "function",
+        7,
+        9,
+    );
 }
 
 #[test]
@@ -59,8 +76,16 @@ fn markdown_output_contains_source_in_code_block() {
         "markdown",
     ]);
     assert_eq!(result.exit_code, 0);
-    assert!(result.stdout.contains("```"));
-    assert!(result.stdout.contains("greet"));
+    assert!(
+        result.stdout.contains("greet [method]") && result.stdout.contains("models.ts:25-27"),
+        "{}",
+        result.stdout
+    );
+    assert!(
+        result.stdout.contains("```\n  greet(): string {"),
+        "{}",
+        result.stdout
+    );
 }
 
 #[test]

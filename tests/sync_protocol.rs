@@ -300,15 +300,123 @@ fn search_prefers_the_nearest_root_and_never_indexes_home() {
     std::fs::create_dir_all(home.join("Downloads")).unwrap();
     std::fs::write(home.join("package.json"), "{}").unwrap();
     std::fs::write(repo.join("tool.py"), "def needle_in_repo():\n    pass\n").unwrap();
-    std::fs::write(home.join("Downloads").join("b.py"), "def needle_elsewhere():\n    pass\n").unwrap();
+    std::fs::write(
+        home.join("Downloads").join("b.py"),
+        "def needle_elsewhere():\n    pass\n",
+    )
+    .unwrap();
     p.set_env("HOME", &home.display().to_string());
 
     let r = p.run_in(&repo, &["search", "needle"]);
     assert_eq!(r.exit_code, 0, "{}", r.stderr);
     assert!(r.stdout.contains("needle_in_repo"), "{}", r.stdout);
-    assert!(!r.stdout.contains("needle_elsewhere"), "indexed beyond the repo: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("needle_elsewhere"),
+        "indexed beyond the repo: {}",
+        r.stdout
+    );
 
     let r = p.run_in(&home.join("Downloads"), &["search", "needle"]);
     assert_eq!(r.exit_code, 1, "searched the home directory: {}", r.stdout);
     assert!(r.stderr.contains("home directory"), "{}", r.stderr);
+}
+
+/// A server that crashes used to leave nothing but "stdout closed": its
+/// stderr went to /dev/null. The last of it now comes with the error.
+#[test]
+fn a_crashing_server_s_last_words_are_in_the_error() {
+    let p = project("crash-tail", "fn a() {}\nfn b() {}\n");
+    p.set_env(
+        "FAKE_LSP_CRASH_ON_HOVER",
+        "panic: index out of range in the fake server",
+    );
+    ok(&p, &["outline", &p.file()]);
+    let r = p.run(&["doc", &p.file(), "--scope", "2"]);
+    assert_eq!(r.exit_code, 1, "{}", r.stdout);
+    assert!(
+        r.stderr
+            .contains("panic: index out of range in the fake server"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("exited"), "{}", r.stderr);
+}
+
+/// After an upgrade (or a rebuild), a daemon started by the old `lsp` kept
+/// serving every command with its old code for as long as it had warm
+/// servers. A CLI from a different build now replaces it.
+#[test]
+fn a_daemon_from_a_different_build_is_replaced() {
+    let p = project("build-skew", "fn a() {}\n");
+    let log = p.home.path().join("server.log");
+    // A daemon (with a warm server) that identifies as another build.
+    let old = support::lsp_in_env(
+        &p.home,
+        &["outline", &p.file()],
+        &[
+            (
+                "PATH",
+                &format!("{}:/usr/bin:/bin", p.home.path().join("fakebin").display()),
+            ),
+            ("LSP_CLI_BUILD_ID", "0.0.1+1"),
+            ("FAKE_LSP_LOG", &log.display().to_string()),
+        ],
+    );
+    assert_eq!(old.exit_code, 0, "{}", old.stderr);
+
+    let r = p.run(&["outline", &p.file()]);
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("restarting the background daemon"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("0.0.1+1"), "{}", r.stderr);
+    // The old daemon shut its server down on the way out.
+    let methods = std::fs::read_to_string(&log).unwrap();
+    assert!(methods.lines().any(|m| m == "shutdown"), "{methods}");
+
+    // Same build now: no restart.
+    let again = p.run(&["outline", &p.file()]);
+    assert_eq!(again.exit_code, 0);
+    assert!(!again.stderr.contains("restarting"), "{}", again.stderr);
+}
+
+/// A daemon from a *newer* build is left alone: two installs sharing a
+/// state directory would otherwise restart it every time they alternated,
+/// throwing away every warm server. And a conditional shutdown aimed at a
+/// build the daemon isn't is refused, so parallel commands replacing an old
+/// daemon can't kill the new one a sibling just started.
+#[test]
+fn a_newer_daemon_is_kept_and_a_shutdown_for_another_build_is_refused() {
+    let p = project("build-newer", "fn a() {}\n");
+    let newer = support::lsp_in_env(
+        &p.home,
+        &["server", "list"],
+        &[("LSP_CLI_BUILD_ID", "999.0.0+1")],
+    );
+    assert_eq!(newer.exit_code, 0, "{}", newer.stderr);
+    let r = p.run(&["outline", &p.file()]);
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert!(!r.stderr.contains("restarting"), "{}", r.stderr);
+
+    let socket = p.home.path().join("manager.sock");
+    let refused = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+body = b'{"if_build": "0.0.1+1"}'
+s.sendall(b"POST /shutdown HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+print(s.recv(100).split(b"\r\n")[0].decode())
+"#,
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&refused.stdout);
+    assert!(status.contains("409"), "{status}");
+    assert!(socket.exists(), "the daemon shut down anyway");
 }

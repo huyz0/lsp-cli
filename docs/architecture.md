@@ -139,6 +139,18 @@ entry, not 300. A rename is a deletion of the old path plus a creation of
 the new one; it used to reach the server as "changed" events only, so the
 old path was never reported gone.
 
+Every daemon response carries an `x-lsp-cli-build` header (the crate
+version plus the executable's mtime). `ensure_running` compares it with its
+own build and, on a mismatch or a daemon too old to send one, shuts that
+daemon down and starts a new one: otherwise a daemon started before an
+upgrade or a rebuild kept serving with its old code for as long as it had
+servers warm.
+
+A language server's stderr is read continuously into a 40-line tail
+(`StderrTail`). When a request fails because the server died, the tail is
+appended to the error and written to the daemon log; it used to go to
+`/dev/null`, leaving only "stdout closed".
+
 The daemon exits on its own when it has had no servers and no connections
 for `daemonIdleTimeout` (default: `idleTimeout`), and as soon as the socket
 file at its path is no longer the one it bound (deleted with its state

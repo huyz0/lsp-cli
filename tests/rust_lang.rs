@@ -41,9 +41,11 @@ fn definition_follows_cross_file_use() {
         "let u = <|>User",
     ]);
     assert_eq!(data["kind"], "definition");
-    let locations = data["locations"].as_array().unwrap();
-    assert!(!locations.is_empty());
-    assert!(locations[0]["uri"].as_str().unwrap().contains("user.rs"));
+    // `pub struct User` at user.rs:2, name at character 11.
+    assert_eq!(
+        support::locations(&data),
+        vec![("user.rs".to_string(), 2, 11)]
+    );
 }
 
 #[test]
@@ -62,7 +64,15 @@ fn doc_returns_hover_for_struct_via_line_scope() {
         "struct <|>User",
     ]);
     assert_eq!(data["kind"], "hover");
-    assert!(data["content"].as_str().unwrap().contains("User"));
+    // The hover must be about *this* symbol: its signature and its own doc
+    // comment. Checking for non-empty content (or the symbol's name, which
+    // nearly any hover nearby contains) let a hover on the wrong symbol pass.
+    let content = data["content"].as_str().unwrap();
+    assert!(content.contains("pub struct User"), "{content}");
+    assert!(
+        content.contains("Represents a user in the system."),
+        "{content}"
+    );
 }
 
 #[test]

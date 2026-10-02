@@ -23,7 +23,7 @@ Reach for `lsp` when the question is about a **symbol**:
 | Where is X defined? | `lsp definition <file> --scope X` |
 | What uses X? | `lsp reference <file> --scope X` |
 | What calls X? (call sites only) | `lsp calls <file> --scope X` |
-| What extends X? | `lsp hierarchy <file> --scope X` |
+| What extends / implements X? | `lsp hierarchy <file> --scope X` (gopls, csharp-ls, jdtls), or `lsp reference <file> --scope X --mode implementations` (any server) |
 | What is X's type and docs? | `lsp doc <file> --scope X` |
 | Show me X's source | `lsp symbol <file> --scope X` |
 | Does this file compile? | `lsp diagnostics <file>` |
@@ -165,6 +165,17 @@ non-overlapping) before any file is written, and if one doesn't apply,
 nothing is written and the command fails. Files edited since the server
 last saw them are re-read first, so the edits match what is on disk.
 
+### What the results contain
+
+- `calls` lists each caller (incoming) or callee (outgoing) with its own
+  declaration (`uri`, `line`) and `callSites`: the lines where the calls
+  are made. For incoming calls those are in the caller's file; for
+  outgoing calls, in the file you queried. Edit at the call site, not
+  the declaration.
+- `symbol` returns the source with the `uri` and the `line`..`endLine` it
+  came from, so you can edit it without looking it up again.
+- `outline` is in source order, nested (members under their class).
+
 ### `reference` and `search` are paginated
 
 Default page size is 20, configurable as `defaultMaxItems`.
@@ -257,8 +268,10 @@ Configuration lives in `~/.lsp-cli/config.json`, all durations in
 | "Unsupported file type" | The extension is not one of the supported languages. Use grep. |
 | `invalid value '...' for '--mode'` / `--direction` / `--output` | Rejected at parse time; the error lists the valid values. `calls` uses `incoming`/`outgoing`, `hierarchy` uses `subtypes`/`supertypes`. |
 | `Unknown --kinds value(s)` | Same idea for `search --kinds`; the message lists every valid kind. |
+| "The language server exited. Its last output: ..." | The server crashed; what it printed is in the error (and in `~/.lsp-cli/logs/daemon.log`). The next command starts it again. |
+| "restarting the background daemon: it is from a different build" | Expected once after upgrading or rebuilding `lsp`. |
 | A command hangs, or results look stale | `lsp server list` to see what is running, then `lsp server stop <project>` to force a respawn. `lsp server shutdown` if the daemon itself is wedged. |
-| `hierarchy` fails on TypeScript | `typescript-language-server` does not implement type hierarchy. Not a bug in this tool. |
+| "does not support `textDocument/prepareTypeHierarchy`" | typescript-language-server, basedpyright and rust-analyzer don't implement type hierarchy. Use `lsp reference --scope X --mode implementations`. Any "does not support" error is the server's limit, not this tool's. |
 | `outline --scope` is rejected | `outline` describes a whole file. Use `lsp symbol` for one symbol. |
 
 ## MCP

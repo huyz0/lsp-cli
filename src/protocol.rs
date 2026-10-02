@@ -262,11 +262,25 @@ pub struct CallHierarchyItem {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallHierarchyIncomingCall {
     pub from: CallHierarchyItem,
+    /// Where `from` makes the call(s), in `from`'s own file.
+    #[serde(default, rename = "fromRanges")]
+    pub from_ranges: Vec<Range>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallHierarchyOutgoingCall {
     pub to: CallHierarchyItem,
+    /// Where the queried item makes the call(s), in the *queried* file.
+    #[serde(default, rename = "fromRanges")]
+    pub from_ranges: Vec<Range>,
+}
+
+/// One `calls` result: the caller (incoming) or callee (outgoing), and the
+/// call sites with the file they are in.
+pub struct CallEntry {
+    pub item: CallHierarchyItem,
+    pub sites_uri: String,
+    pub sites: Vec<Range>,
 }
 
 /// `TypeHierarchyItem` has the exact same shape as `CallHierarchyItem` per

@@ -16,6 +16,54 @@ use std::path::PathBuf;
 /// independent instances side by side.
 pub const HOME_ENV: &str = "LSP_CLI_HOME";
 
+/// Identifies this build of `lsp`: the crate version plus the executable's
+/// modification time, so a local rebuild counts as a different build too.
+/// `LSP_CLI_BUILD_ID` overrides it (tests use that to stand up a daemon
+/// that looks like an older build).
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        if let Ok(id) = std::env::var("LSP_CLI_BUILD_ID") {
+            return id;
+        }
+        let stamp = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{}+{stamp}", env!("CARGO_PKG_VERSION"))
+    })
+}
+
+/// Response header carrying the daemon's `build_id`.
+pub const BUILD_HEADER: &str = "x-lsp-cli-build";
+
+/// Whether a daemon reporting `daemon_build` is older than `ours`, and so
+/// should be replaced by this CLI. Builds are `VERSION+MTIME`; a missing or
+/// unparseable id (a daemon from before ids existed) counts as older.
+///
+/// Only older, not merely different: two installs sharing a state
+/// directory (Homebrew and a `cargo build`, say) would otherwise each
+/// restart the daemon whenever the other had last used it, throwing away
+/// every warm server each time. Comparing by age converges on the newest.
+pub fn is_older_build(daemon_build: Option<&str>, ours: &str) -> bool {
+    fn parse(id: &str) -> Option<(Vec<u64>, u64)> {
+        let (version, stamp) = id.split_once('+')?;
+        let version = version
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect::<Option<Vec<u64>>>()?;
+        Some((version, stamp.parse().ok()?))
+    }
+    match (daemon_build.and_then(parse), parse(ours)) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(theirs), Some(ours)) => theirs < ours,
+    }
+}
+
 /// Root of lsp-cli's state directory: `$LSP_CLI_HOME`, else `~/.lsp-cli`.
 pub fn lsp_cli_home() -> PathBuf {
     if let Some(dir) = std::env::var_os(HOME_ENV) {
@@ -162,5 +210,21 @@ mod tests {
         std::env::set_var(HOME_ENV, "");
         assert!(lsp_cli_home().ends_with(".lsp-cli"));
         std::env::remove_var(HOME_ENV);
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::is_older_build;
+
+    #[test]
+    fn only_an_older_or_unidentified_daemon_is_replaced() {
+        assert!(is_older_build(None, "0.3.0+100"));
+        assert!(is_older_build(Some("garbage"), "0.3.0+100"));
+        assert!(is_older_build(Some("0.2.0+999"), "0.3.0+100"));
+        assert!(is_older_build(Some("0.3.0+99"), "0.3.0+100"));
+        assert!(!is_older_build(Some("0.3.0+100"), "0.3.0+100"));
+        assert!(!is_older_build(Some("0.3.0+101"), "0.3.0+100"));
+        assert!(!is_older_build(Some("0.10.0+1"), "0.9.0+100"));
     }
 }

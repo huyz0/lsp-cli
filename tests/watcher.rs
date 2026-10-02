@@ -9,7 +9,7 @@ mod support;
 
 use std::io::BufReader;
 use std::process::{ChildStderr, Command, Stdio};
-use support::{has_ts_server, isolated_home, lsp_in, ts_fixture};
+use support::{has_ts_server, isolated_home, lsp_in};
 
 #[test]
 fn editing_an_unopened_file_triggers_a_watch_notification() {
@@ -37,14 +37,17 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
     // own retry/wait, but this keeps the test's own timing predictable).
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let file = ts_fixture("src/models.ts");
+    // A private copy of the project: this test edits a file, and the shared
+    // fixture is being queried by other test binaries in parallel.
+    let project = support::ts_project_copy();
+    let file = project.path().join("src/models.ts");
     let start = lsp_in(&home, &["server", "start", file.to_str().unwrap()]);
     assert_eq!(start.exit_code, 0, "{}", start.stderr);
 
     // Edit a *different* file in the same project — one the server was
     // never told to open via textDocument/didOpen — to prove the watcher
     // (not just didOpen-triggered indexing) is what's picking this up.
-    let watched_file = ts_fixture("src/index.ts");
+    let watched_file = project.path().join("src/index.ts");
     let original = std::fs::read_to_string(&watched_file).unwrap();
     std::fs::write(&watched_file, format!("{original}// watcher-test-edit\n")).unwrap();
 
@@ -53,9 +56,6 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
         "change(s) detected",
         std::time::Duration::from_secs(5),
     );
-
-    // Always restore the fixture, even if the assertion below fails.
-    std::fs::write(&watched_file, &original).unwrap();
 
     let _ = daemon.kill();
     let _ = daemon.wait();

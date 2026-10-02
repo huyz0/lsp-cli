@@ -1088,7 +1088,23 @@ impl Manager {
     }
 }
 
-async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
+async fn shutdown_handler(
+    State(m): State<SharedManager>,
+    body: axum::body::Bytes,
+) -> axum::http::StatusCode {
+    // `{"if_build": X}`: shut down only if this daemon is build X (the one
+    // the caller saw and wants replaced). See `ManagerClient::ensure_running`.
+    let wanted = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("if_build").cloned());
+    match wanted {
+        Some(Value::String(build)) if build != crate::paths::build_id() => {
+            return axum::http::StatusCode::CONFLICT;
+        }
+        // The caller saw a daemon with no build id; this one has one.
+        Some(Value::Null) => return axum::http::StatusCode::CONFLICT,
+        _ => {}
+    }
     // Give up the socket path first. It used to stay bound until after
     // every server had shut down and a grace period had passed, so a
     // command issued right after `server shutdown` found the old daemon
@@ -1280,9 +1296,17 @@ async fn serve_uds(listener: tokio::net::UnixListener, router: Router) -> Result
             let service = hyper::service::service_fn(move |req| {
                 let router = router.clone();
                 async move {
-                    Ok::<_, std::convert::Infallible>(
-                        tower::ServiceExt::oneshot(router, req).await.unwrap(),
-                    )
+                    let mut response = tower::ServiceExt::oneshot(router, req).await.unwrap();
+                    // Every response says which build answered, so a CLI
+                    // from a different build can replace this daemon
+                    // instead of being served by stale code
+                    // (`ManagerClient::ensure_running`).
+                    if let Ok(value) = axum::http::HeaderValue::from_str(crate::paths::build_id()) {
+                        response
+                            .headers_mut()
+                            .insert(crate::paths::BUILD_HEADER, value);
+                    }
+                    Ok::<_, std::convert::Infallible>(response)
                 }
             });
             let _ =

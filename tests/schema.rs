@@ -107,3 +107,33 @@ fn schema_for_unknown_command_errors() {
     assert_eq!(result.exit_code, 1);
     assert!(result.stderr.contains("Unknown command"));
 }
+
+/// The MCP bridge turns every tool argument into `--<property>` (or a
+/// positional for `file`/`query`/`language`/`path`/`command`/
+/// `subcommand`) and re-invokes the CLI, so a schema property that isn't a
+/// real flag of that command makes the tool call fail with a usage error.
+/// Pins schema and CLI together for every command, in place of one MCP
+/// round trip per tool.
+#[test]
+fn every_schema_property_is_a_real_flag_of_its_command() {
+    let schemas: serde_json::Value =
+        serde_json::from_str(&support::lsp(&["schema"]).stdout).unwrap();
+    let positional = ["file", "query", "language", "path", "command", "subcommand"];
+    let mut checked = 0;
+    for (command, schema) in schemas.as_object().unwrap() {
+        let help = support::lsp(&[command, "--help"]);
+        assert_eq!(help.exit_code, 0, "{command} --help: {}", help.stderr);
+        for property in schema["properties"].as_object().unwrap().keys() {
+            if positional.contains(&property.as_str()) {
+                continue;
+            }
+            assert!(
+                help.stdout.contains(&format!("--{property}")),
+                "`lsp {command}` has no --{property}, but its schema (and so its MCP tool) offers it:\n{}",
+                help.stdout
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 30, "only {checked} properties checked");
+}

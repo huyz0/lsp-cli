@@ -1,5 +1,5 @@
 use crate::protocol::{
-    symbol_kind_name, CallHierarchyItem, Diagnostic, DocumentSymbol, HoverResult, Location,
+    symbol_kind_name, CallEntry, Diagnostic, DocumentSymbol, HoverResult, Location,
     SymbolInformation, TextEdit, TypeHierarchyItem,
 };
 use serde_json::json;
@@ -161,20 +161,36 @@ impl OutputFormat {
         }
     }
 
-    pub fn symbol_source(&self, name: &str, kind: u32, source: &str) -> String {
+    /// `path`, `line` and `endLine` (1-based, inclusive) say where the
+    /// source came from. They used to be absent, so an agent that read a
+    /// symbol's source had to look it up again before it could edit it.
+    pub fn symbol_source(
+        &self,
+        name: &str,
+        kind: u32,
+        path: &std::path::Path,
+        lines: (usize, usize),
+        source: &str,
+    ) -> String {
         match self {
             OutputFormat::Json => json!({
                 "kind": "symbol",
                 "name": name,
                 "symbolKind": symbol_kind_name(kind),
+                "uri": path.to_string_lossy(),
+                "line": lines.0,
+                "endLine": lines.1,
                 "source": source,
             })
             .to_string(),
             OutputFormat::Markdown => format!(
-                "### {} {} [{}]\n\n```\n{}\n```",
+                "### {} {} [{}] {}:{}-{}\n\n```\n{}\n```",
                 icon(kind),
                 name,
                 symbol_kind_name(kind),
+                path.display(),
+                lines.0,
+                lines.1,
                 source
             ),
         }
@@ -217,34 +233,59 @@ impl OutputFormat {
         }
     }
 
-    pub fn calls(&self, direction: &str, items: &[CallHierarchyItem]) -> String {
+    /// Each caller/callee with its declaration (`uri`/`line`) and the
+    /// lines where the calls are made (`callSites`). Only the declaration
+    /// used to be reported — the line of `greetUser`, not the line inside
+    /// it that calls `greet()`, which is the one an agent changing the call
+    /// needs. For outgoing calls the sites are in the queried file, so each
+    /// site carries its own `uri`.
+    pub fn calls(&self, direction: &str, entries: &[CallEntry]) -> String {
         match self {
             OutputFormat::Json => json!({
                 "kind": "calls",
                 "direction": direction,
-                "items": items.iter().map(|i| json!({
-                    "name": i.name,
-                    "symbolKind": symbol_kind_name(i.kind),
-                    "detail": i.detail,
-                    "uri": uri_to_path(&i.uri),
-                    "line": i.selection_range.start.line + 1,
-                    "character": i.selection_range.start.character,
+                "items": entries.iter().map(|e| json!({
+                    "name": e.item.name,
+                    "symbolKind": symbol_kind_name(e.item.kind),
+                    "detail": e.item.detail,
+                    "uri": uri_to_path(&e.item.uri),
+                    "line": e.item.selection_range.start.line + 1,
+                    "character": e.item.selection_range.start.character,
+                    "callSites": e.sites.iter().map(|r| json!({
+                        "uri": uri_to_path(&e.sites_uri),
+                        "line": r.start.line + 1,
+                        "character": r.start.character,
+                    })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>()
             })
             .to_string(),
             OutputFormat::Markdown => {
-                if items.is_empty() {
+                if entries.is_empty() {
                     return format!("No {direction} calls found.");
                 }
-                items
+                entries
                     .iter()
-                    .map(|i| {
+                    .map(|e| {
+                        let sites: Vec<String> = e
+                            .sites
+                            .iter()
+                            .map(|r| (r.start.line + 1).to_string())
+                            .collect();
+                        let sites = if sites.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " (calls at {}:{})",
+                                uri_to_path(&e.sites_uri),
+                                sites.join(",")
+                            )
+                        };
                         format!(
-                            "{} {} — {}:{}",
-                            icon(i.kind),
-                            i.name,
-                            uri_to_path(&i.uri),
-                            i.selection_range.start.line + 1
+                            "{} {} — {}:{}{sites}",
+                            icon(e.item.kind),
+                            e.item.name,
+                            uri_to_path(&e.item.uri),
+                            e.item.selection_range.start.line + 1
                         )
                     })
                     .collect::<Vec<_>>()

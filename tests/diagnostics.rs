@@ -1,14 +1,5 @@
 mod support;
-use support::{has_ts_server, lsp_json, ts_fixture};
-
-/// Deletes the fixture file on drop, so it's cleaned up even if an
-/// assertion below panics mid-test.
-struct CleanupOnDrop(std::path::PathBuf);
-impl Drop for CleanupOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+use support::{has_ts_server, lsp_json, ts_fixture, ts_project_copy};
 
 #[test]
 fn reports_a_real_type_error() {
@@ -16,9 +7,11 @@ fn reports_a_real_type_error() {
         eprintln!("skipping: typescript-language-server not installed");
         return;
     }
-    let broken = ts_fixture("src/diagnostics_check.ts");
+    // A private copy: writing into the shared fixture raced every other
+    // test binary querying it.
+    let project = ts_project_copy();
+    let broken = project.path().join("src/diagnostics_check.ts");
     std::fs::write(&broken, "const result: string = 1 + 1;\n").unwrap();
-    let _cleanup = CleanupOnDrop(broken.clone());
 
     let data = lsp_json(&["diagnostics", broken.to_str().unwrap()]);
     assert_eq!(data["kind"], "diagnostics");
@@ -27,7 +20,9 @@ fn reports_a_real_type_error() {
         !items.is_empty(),
         "expected at least one diagnostic, got {items:?}"
     );
+    assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["severity"], "error");
+    assert_eq!(items[0]["line"], 1);
     assert!(
         items[0]["message"]
             .as_str()
