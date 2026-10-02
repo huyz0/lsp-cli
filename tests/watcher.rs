@@ -48,7 +48,11 @@ fn editing_an_unopened_file_triggers_a_watch_notification() {
     let original = std::fs::read_to_string(&watched_file).unwrap();
     std::fs::write(&watched_file, format!("{original}// watcher-test-edit\n")).unwrap();
 
-    let found = read_stderr_until(stderr, "[watcher]", std::time::Duration::from_secs(5));
+    let found = read_stderr_until(
+        stderr,
+        "change(s) detected",
+        std::time::Duration::from_secs(5),
+    );
 
     // Always restore the fixture, even if the assertion below fails.
     std::fs::write(&watched_file, &original).unwrap();

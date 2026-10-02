@@ -40,7 +40,7 @@ fn settle_delay(language: &str) -> std::time::Duration {
     std::time::Duration::from_millis(crate::config::load_config().settle_ms)
 }
 
-use crate::bm25::{is_ignored_dir_name, Bm25Index};
+use crate::bm25::Bm25Index;
 use crate::format::OutputFormat;
 use crate::locate::resolve_locate;
 use crate::manager_client::ManagerClient;
@@ -856,7 +856,7 @@ pub async fn run_reference(
     } else {
         &[]
     };
-    println!("{}", fmt.reference(page));
+    println!("{}", fmt.reference(page, all_locations.len(), start_index));
 
     let remaining = all_locations.len().saturating_sub(start_index + page.len());
     if remaining > 0 {
@@ -1027,18 +1027,7 @@ pub async fn run_search(
     start_index: usize,
     fmt: &OutputFormat,
 ) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let project_root = match project {
-        Some(p) => p.to_string(),
-        None => {
-            // Best-effort auto-detect, same probing strategy as search.ts.
-            registry::detect_project_root(&cwd.join("index.ts"))
-                .or_else(|| registry::detect_project_root(&cwd.join("main.go")))
-                .or_else(|| registry::detect_project_root(&cwd.join("main.py")))
-                .map(|d| d.root.to_string_lossy().to_string())
-                .unwrap_or_else(|| cwd.to_string_lossy().to_string())
-        }
-    };
+    let project_root = search_root(project)?;
 
     if dry_run {
         print_dry_run(
@@ -1050,18 +1039,18 @@ pub async fn run_search(
         return Ok(());
     }
 
-    // Try LSP (via the warm daemon-managed server, same as the other
-    // navigation commands) if a project language can be detected; otherwise
-    // (or on any failure — including "no server installed", which this path
-    // does not attempt to auto-install, matching the TS original's search.ts)
-    // fall back to the self-built BM25 index.
+    // A language server's `workspace/symbol` when one is already warm for
+    // this project; otherwise (or if it finds nothing) the self-built BM25
+    // index. See `try_lsp_search` for why search never starts a server.
     let mut results: Vec<SymbolInformation> = try_lsp_search(&project_root, query)
         .await
         .unwrap_or_default();
-
-    if results.is_empty() {
+    let backend = if results.is_empty() {
         results = bm25_search(&project_root, query).await;
-    }
+        "bm25"
+    } else {
+        "lsp"
+    };
 
     if let Some(kinds) = kinds {
         // Reject unknown values rather than filtering everything away. An
@@ -1110,6 +1099,7 @@ pub async fn run_search(
         "{}",
         fmt.search(
             query,
+            backend,
             page,
             total,
             start_index,
@@ -1139,51 +1129,88 @@ async fn bm25_search(project_root: &str, query: &str) -> Vec<SymbolInformation> 
         .collect()
 }
 
-async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInformation>> {
-    let root_path = Path::new(project_root);
-    // Find any recognized source file directly under the project root to determine
-    // which language server to launch.
-    // Skip the same directories the BM25 indexer skips. Without this the
-    // "representative source file" could be picked out of `node_modules/`,
-    // `target/`, or `.git/`, which both wastes the walk and can start a
-    // server rooted at a vendored copy of someone else's code. The
-    // `depth() == 0` guard keeps the root itself from being pruned when
-    // the project directory is a dotfile directory (`~/.dotfiles`).
-    let (entry, _) = walkdir::WalkDir::new(root_path)
-        .max_depth(4)
+/// The project `search` covers: `--project` if given, else the nearest
+/// directory at or above the current one holding any language's root
+/// marker (or `.git`).
+///
+/// This used to probe only for `index.ts`, `main.go` and `main.py` in the
+/// current directory, so from a subdirectory (`src/`) of any project, or
+/// anywhere in a Rust, Java, Ruby... project, it fell back to the current
+/// directory itself. Run from a directory that isn't in any project, it
+/// indexed whatever was there — all of `/tmp`, say — so that is refused for
+/// the home directory, the filesystem root and the temp directory.
+fn search_root(project: Option<&str>) -> Result<String> {
+    if let Some(p) = project {
+        return Ok(Path::new(p)
+            .canonicalize()
+            .map_err(|e| anyhow!("--project path not found: {p} ({e})"))?
+            .to_string_lossy()
+            .to_string());
+    }
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let root = registry::find_project_root_upwards(&cwd).unwrap_or_else(|| cwd.clone());
+    // Applies to a found root too: a marker or `.git` sitting directly in
+    // the home directory (a stray `npm install`, a dotfiles repository)
+    // would otherwise make "the project" everything the user owns.
+    let refuse = [
+        dirs::home_dir(),
+        Some(std::path::PathBuf::from("/")),
+        Some(std::env::temp_dir()),
+        Some(std::path::PathBuf::from("/tmp")),
+    ];
+    if refuse
         .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir_name(&e.file_name().to_string_lossy()))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .find_map(|e| registry::detect_language(e.path()).map(|lang| (e, lang.name)))
-        .ok_or_else(|| anyhow!("no recognizable source file"))?;
+        .flatten()
+        .filter_map(|d| d.canonicalize().ok())
+        .any(|d| d == root)
+    {
+        bail!(
+            "{} is not a project to search: it is your home directory, the filesystem root or a temp directory, and searching it would index everything below it. Run from inside a project (a directory with package.json, Cargo.toml, go.mod, .git, ...), or pass --project <dir>.",
+            root.display()
+        );
+    }
+    Ok(root.to_string_lossy().to_string())
+}
 
+/// `workspace/symbol` from a server that is *already running* for
+/// `project_root`, or nothing.
+///
+/// Search used to start a server for whatever source file it found first:
+/// a full rust-analyzer (1.5GB, an 18s first search) as a side effect of
+/// a name lookup, or a JSON server rooted at `/tmp` with a watcher on all
+/// of it. The BM25 index answers immediately instead, and once any
+/// navigation command has warmed a server for the project, search uses it.
+async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInformation>> {
     let client = ManagerClient::new();
-    client.ensure_running().await?;
-    // Use the language the daemon actually registered, not the one
-    // `detect_language` guessed. The two disagree for Deno: extension
-    // detection deliberately skips `deno` (it shares `.ts` with
-    // typescript), while the daemon's root detection prefers it when a
-    // `deno.json` is present — so asking for "typescript" here never
-    // matched the running server and every Deno search silently fell
-    // through to the BM25 index.
-    let info = client
-        .create_server(
-            &entry.path().to_string_lossy(),
-            Some(project_root),
-            None,
-            None,
-        )
-        .await?;
-    let result = client
-        .proxy_request(
-            project_root,
-            Some(&info.language),
-            "workspace/symbol",
-            json!({ "query": query }),
-        )
-        .await?;
-    Ok(serde_json::from_value(result).unwrap_or_default())
+    if !client.is_alive().await {
+        return Ok(vec![]);
+    }
+    let warm: Vec<String> = client
+        .list_servers()
+        .await?
+        .into_iter()
+        .filter(|s| s.project_root == project_root && s.status == "running")
+        .map(|s| s.language)
+        .collect();
+    for language in warm {
+        let Ok(result) = client
+            .proxy_request(
+                project_root,
+                Some(&language),
+                "workspace/symbol",
+                json!({ "query": query }),
+            )
+            .await
+        else {
+            continue;
+        };
+        let found: Vec<SymbolInformation> =
+            decode_list(result, "workspace/symbol").unwrap_or_default();
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
+    Ok(vec![])
 }
 
 // install/run_install_list moved to install.rs, which does real installation

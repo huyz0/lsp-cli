@@ -32,7 +32,8 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
   Two things make it usable at scale. The index is **cached in the daemon**
   per project root rather than rebuilt in the CLI process on every search
   and thrown away at exit; it is revalidated with a stat-only
-  `TreeFingerprint` (file count, total size, newest mtime over the same
+  `TreeFingerprint` (file count plus an order-independent hash of every
+  file's path, size and mtime, over the same
   filtered walk), which is far cheaper than a rebuild and does not depend
   on file-watcher events reaching us — the watcher only covers one
   language's extensions for roots with a live server, so it cannot see the
@@ -44,8 +45,11 @@ See [../CONTRIBUTING.md](../CONTRIBUTING.md) for setup and testing, and
   600k-symbol corpus a warm search went from ~1.2s to ~0.1s. A brute-force
   reference implementation is kept in the tests to pin the equivalence.
 
-  `lsp search` therefore starts the daemon if one isn't running. If it
-  cannot, the index is built in-process as before, just without caching.
+  `lsp search` therefore starts the daemon if one isn't running (but
+  never a language server: `workspace/symbol` is asked only of a server
+  already warm for the project, and the JSON says which backend answered).
+  If the daemon cannot start, the index is built in-process as before,
+  just without caching.
 - **LSP JSON-RPC client** (`src/lsp_client.rs`): hand-rolled Content-Length
   framing, `initialize`, `textDocument/documentSymbol`,
   `textDocument/definition`/`declaration`/`typeDefinition`,
@@ -127,6 +131,19 @@ created later are picked up from their own create events, subtree included,
 since a non-recursive watch does not cover them. Batches also have a hard
 flush deadline, because the debounce window re-arms on every event and a
 build would otherwise defer the flush indefinitely.
+
+Each batch is coalesced to one net change per file before it is sent
+(created-then-changed is created, created-then-deleted is dropped,
+deleted-then-created is changed), so a file written 300 times produces one
+entry, not 300. A rename is a deletion of the old path plus a creation of
+the new one; it used to reach the server as "changed" events only, so the
+old path was never reported gone.
+
+The daemon exits on its own when it has had no servers and no connections
+for `daemonIdleTimeout` (default: `idleTimeout`), and as soon as the socket
+file at its path is no longer the one it bound (deleted with its state
+directory, or replaced by a newer daemon), since nothing can reach it after
+that. Either way it gives up the socket first, then shuts its servers down.
 
 `create()` (spawning a server for a project) is guarded by a
 per-project-root+language lock, not a single global lock, so starting a

@@ -12,6 +12,10 @@ pub struct LspCliConfig {
     /// managed install directory, instead of downloading one.
     #[serde(default = "default_use_path_servers")]
     pub use_path_servers: bool,
+    /// Seconds the daemon stays up with no servers and no requests before
+    /// exiting. Defaults to `idle_timeout`.
+    #[serde(default)]
+    pub daemon_idle_timeout: Option<u64>,
     /// Milliseconds to pause after a document change before querying a
     /// (non-bundled) server. See `commands::settle_delay`.
     #[serde(default)]
@@ -45,6 +49,7 @@ impl Default for LspCliConfig {
             default_max_items: default_max_items(),
             use_path_servers: default_use_path_servers(),
             settle_ms: 0,
+            daemon_idle_timeout: None,
         }
     }
 }
@@ -83,6 +88,9 @@ fn load_config_from(path: &std::path::Path) -> LspCliConfig {
             }
             if let Some(n) = v.get("settleMs").and_then(|x| x.as_u64()) {
                 cfg.settle_ms = n;
+            }
+            if let Some(n) = v.get("daemonIdleTimeout").and_then(|x| x.as_u64()) {
+                cfg.daemon_idle_timeout = Some(n);
             }
             cfg
         })

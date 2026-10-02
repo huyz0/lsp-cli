@@ -418,6 +418,24 @@ impl FakeServerProject {
         self.dir.join("main.zig").display().to_string()
     }
 
+    /// Like `run`, with `dir` as the working directory.
+    pub fn run_in(&self, dir: &Path, args: &[&str]) -> RunResult {
+        let extra = self.extra.lock().unwrap().clone();
+        let output = Command::new(bin_path())
+            .args(args)
+            .current_dir(dir)
+            .env("LSP_CLI_HOME", self.home.path())
+            .env("PATH", &self.path)
+            .envs(extra.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .output()
+            .expect("failed to execute lsp binary");
+        RunResult {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(1),
+        }
+    }
+
     pub fn run(&self, args: &[&str]) -> RunResult {
         let extra = self.extra.lock().unwrap().clone();
         let mut envs: Vec<(&str, &str)> = vec![("PATH", self.path.as_str())];
@@ -482,4 +500,19 @@ pub fn locations(data: &serde_json::Value) -> Vec<(String, u64, u64)> {
             )
         })
         .collect()
+}
+
+/// Whether `dir` or an ancestor has a `.git` or a common root marker.
+pub fn find_marker_upwards(dir: &Path) -> bool {
+    dir.ancestors().any(|d| {
+        [
+            ".git",
+            "package.json",
+            "Cargo.toml",
+            "go.mod",
+            "pyproject.toml",
+        ]
+        .iter()
+        .any(|m| d.join(m).exists())
+    })
 }

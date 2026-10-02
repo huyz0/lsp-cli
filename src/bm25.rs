@@ -378,31 +378,33 @@ fn source_exts() -> &'static std::collections::HashSet<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeFingerprint {
     files: usize,
-    total_len: u64,
-    newest_mtime: Option<std::time::SystemTime>,
+    /// Order-independent combination of every file's (path, length, mtime).
+    ///
+    /// This used to be a total length plus the newest mtime, which a rename
+    /// leaves unchanged (`mv` keeps the size and the mtime), so the cached
+    /// index kept returning the old path long after the file had moved. It
+    /// also missed an edit that kept a file's size while restoring an older
+    /// mtime. Same stat walk, same cost.
+    digest: u64,
 }
 
 impl TreeFingerprint {
     pub fn of(project_root: &str) -> Self {
+        use std::hash::{Hash, Hasher};
         let mut files = 0usize;
-        let mut total_len = 0u64;
-        let mut newest_mtime: Option<std::time::SystemTime> = None;
+        let mut digest = 0u64;
         for entry in source_files(project_root) {
             let Ok(meta) = entry.metadata() else { continue };
             files += 1;
-            total_len += meta.len();
-            if let Ok(m) = meta.modified() {
-                newest_mtime = Some(match newest_mtime {
-                    Some(cur) if cur >= m => cur,
-                    _ => m,
-                });
-            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            entry.path().hash(&mut h);
+            meta.len().hash(&mut h);
+            meta.modified().ok().hash(&mut h);
+            // Wrapping sum: independent of walk order, and unlike XOR two
+            // identical entries don't cancel out.
+            digest = digest.wrapping_add(h.finish());
         }
-        Self {
-            files,
-            total_len,
-            newest_mtime,
-        }
+        Self { files, digest }
     }
 }
 
@@ -555,9 +557,27 @@ impl Bm25Index {
             .filter(|(score, _)| *score > 0.0)
             .collect();
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(rank_order);
         scored
     }
+}
+
+/// Highest score first; ties broken by location and name. Without the
+/// tiebreak, equal scores kept the directory walk's order, which can
+/// change between index builds — so the same query could page differently
+/// before and after an unrelated rebuild.
+fn rank_order(a: &(f64, &SymbolInformation), b: &(f64, &SymbolInformation)) -> std::cmp::Ordering {
+    b.0.partial_cmp(&a.0)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.1.location.uri.cmp(&b.1.location.uri))
+        .then_with(|| {
+            a.1.location
+                .range
+                .start
+                .line
+                .cmp(&b.1.location.range.start.line)
+        })
+        .then_with(|| a.1.name.cmp(&b.1.name))
 }
 
 #[cfg(test)]
@@ -604,7 +624,7 @@ mod tests {
             })
             .filter(|(score, _)| *score > 0.0)
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(rank_order);
         scored
     }
 
@@ -941,6 +961,37 @@ mod tests {
     }
 
     // --- TreeFingerprint ----------------------------------------------
+
+    #[test]
+    fn fingerprint_changes_when_a_file_is_renamed() {
+        // `mv` keeps the size and the mtime, so the old count + total size
+        // + newest mtime fingerprint stayed equal and the cache kept
+        // returning a path that no longer existed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("one.lua"), "function a() end\n").unwrap();
+        let before = TreeFingerprint::of(root);
+        std::fs::rename(dir.path().join("one.lua"), dir.path().join("two.lua")).unwrap();
+        assert_ne!(before, TreeFingerprint::of(root));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_an_older_same_size_version_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let f = dir.path().join("a.lua");
+        std::fs::write(&f, "function a() end\n").unwrap();
+        let old_mtime = std::fs::metadata(&f).unwrap().modified().unwrap();
+        let before = TreeFingerprint::of(root);
+        std::fs::write(&f, "function b() end\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(old_mtime - std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_ne!(before, TreeFingerprint::of(root));
+    }
     // The cached index in the daemon is only correct if this notices every
     // change that could alter the index.
 

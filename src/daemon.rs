@@ -923,6 +923,10 @@ fn first_symbol_position(result: &Value) -> Option<Value> {
 const EXIT_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How often the idle reaper scans for servers to evict.
+/// How long an exiting daemon waits for connections already accepted to
+/// finish.
+const EXIT_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Pure predicate extracted out of reap_idle for direct unit testing.
@@ -1000,6 +1004,53 @@ async fn search_handler(
 /// The socket this daemon bound: its path and inode.
 static BOUND_SOCKET: std::sync::OnceLock<(std::path::PathBuf, u64)> = std::sync::OnceLock::new();
 
+/// Whether the socket file at our path is still the one this daemon bound.
+/// `false` once it has been deleted or replaced — by a newer daemon, or by
+/// someone removing the state directory — after which no client can ever
+/// reach this daemon again.
+fn still_own_socket() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some((path, ino)) = BOUND_SOCKET.get() else {
+        return true;
+    };
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.ino() == *ino)
+}
+
+/// When the daemon last accepted a connection (ms since the epoch), and
+/// how many connections are being served right now. See `should_exit_idle`.
+static LAST_ACTIVITY_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one connection as in flight for as long as it lives.
+struct InFlight;
+
+impl InFlight {
+    fn start() -> Self {
+        LAST_ACTIVITY_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        InFlight
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        LAST_ACTIVITY_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Whether a daemon with no servers should exit: nothing in flight, and no
+/// connection for longer than `idle`. Split out for testing.
+fn should_exit_idle(
+    servers: usize,
+    in_flight: usize,
+    last_activity: i64,
+    now: i64,
+    idle: i64,
+) -> bool {
+    servers == 0 && in_flight == 0 && now - last_activity > idle
+}
+
 /// Removes the socket file, but only if it is still the one this daemon
 /// bound. Once a shutting-down daemon has given up its path, a new daemon
 /// may already have bound a fresh socket there; deleting *that* would
@@ -1014,6 +1065,29 @@ fn remove_own_socket() {
     }
 }
 
+impl Manager {
+    /// Shuts down every server and watcher. The caller gives up the socket
+    /// first, so a client arriving meanwhile starts a new daemon instead of
+    /// reaching this dying one.
+    async fn shutdown_everything(&self) {
+        // Snapshot then release, as in `delete`/`reap_idle`: each
+        // `shutdown()` awaits up to 3s, and holding the map lock across
+        // all of them blocks any request still in flight.
+        let clients: Vec<Arc<Mutex<LspClient>>> = {
+            let servers = self.servers.lock().await;
+            servers.values().map(|s| s.client.clone()).collect()
+        };
+        for client in clients {
+            client.lock().await.shutdown().await;
+        }
+        self.watcher.dispose().await;
+    }
+
+    async fn server_count(&self) -> usize {
+        self.servers.lock().await.len()
+    }
+}
+
 async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusCode {
     // Give up the socket path first. It used to stay bound until after
     // every server had shut down and a grace period had passed, so a
@@ -1022,17 +1096,7 @@ async fn shutdown_handler(State(m): State<SharedManager>) -> axum::http::StatusC
     // manager daemon") instead of starting a new one. The connection this
     // request arrived on is unaffected.
     remove_own_socket();
-    // Snapshot then release, as in `delete`/`reap_idle`: each `shutdown()`
-    // awaits up to 3s, and holding the map lock across all of them blocks
-    // any request still in flight while we're trying to exit.
-    let clients: Vec<Arc<Mutex<LspClient>>> = {
-        let servers = m.servers.lock().await;
-        servers.values().map(|s| s.client.clone()).collect()
-    };
-    for client in clients {
-        client.lock().await.shutdown().await;
-    }
-    m.watcher.dispose().await;
+    m.shutdown_everything().await;
     tokio::spawn(async {
         tokio::time::sleep(EXIT_GRACE_PERIOD).await;
         std::process::exit(0);
@@ -1111,10 +1175,51 @@ pub async fn start_daemon() -> Result<()> {
 
     let idle_manager = manager.clone();
     let idle_timeout = std::time::Duration::from_secs(cfg.idle_timeout);
+    let daemon_idle_ms = cfg.daemon_idle_timeout.unwrap_or(cfg.idle_timeout) as i64 * 1000;
+    // Often enough to honour a short daemon idle timeout, never more often
+    // than once a second.
+    let reap_interval = REAP_INTERVAL.min(std::time::Duration::from_millis(
+        (daemon_idle_ms as u64 / 2).max(1000),
+    ));
+    LAST_ACTIVITY_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(REAP_INTERVAL).await;
+            tokio::time::sleep(reap_interval).await;
             idle_manager.reap_idle(idle_timeout).await;
+            // The daemon used to run forever. One whose socket was deleted
+            // or replaced can never be reached again, and one with nothing
+            // to serve for a long time is only holding memory; both exit.
+            // (Test runs left dozens behind, one per state directory.)
+            let orphaned = !still_own_socket();
+            let idle = should_exit_idle(
+                idle_manager.server_count().await,
+                IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed),
+                LAST_ACTIVITY_MS.load(std::sync::atomic::Ordering::Relaxed),
+                now_ms(),
+                daemon_idle_ms,
+            );
+            if orphaned || idle {
+                eprintln!(
+                    "[daemon] exiting: {}",
+                    if orphaned {
+                        "its socket is gone or was replaced"
+                    } else {
+                        "idle"
+                    }
+                );
+                // Give up the path first, so any client from here on starts
+                // a fresh daemon; then let connections accepted just before
+                // that finish, rather than cutting them off mid-response.
+                remove_own_socket();
+                let drain_by = std::time::Instant::now() + EXIT_DRAIN_LIMIT;
+                while IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed) > 0
+                    && std::time::Instant::now() < drain_by
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                idle_manager.shutdown_everything().await;
+                std::process::exit(0);
+            }
         }
     });
 
@@ -1164,7 +1269,13 @@ async fn serve_uds(listener: tokio::net::UnixListener, router: Router) -> Result
             }
         };
         let router = router.clone();
+        let guard = InFlight::start();
         tokio::spawn(async move {
+            // Dropped when the connection ends, however it ends — a handler
+            // that panics aborts this task, and a counter decremented by a
+            // statement after the await would then never come back down,
+            // leaving the daemon unable to ever go idle.
+            let _guard = guard;
             let io = hyper_util::rt::TokioIo::new(stream);
             let service = hyper::service::service_fn(move |req| {
                 let router = router.clone();
@@ -1228,6 +1339,16 @@ mod tests {
         assert!(first_symbol_position(&serde_json::json!([])).is_none());
         assert!(first_symbol_position(&serde_json::Value::Null).is_none());
         assert!(first_symbol_position(&serde_json::json!([{ "name": "x" }])).is_none());
+    }
+
+    #[test]
+    fn the_daemon_exits_only_when_empty_quiet_and_idle_long_enough() {
+        // No servers, nothing in flight, idle past the limit: exit.
+        assert!(should_exit_idle(0, 0, 1_000, 12_000, 10_000));
+        // Any one of those not holding keeps it alive.
+        assert!(!should_exit_idle(1, 0, 1_000, 12_000, 10_000));
+        assert!(!should_exit_idle(0, 1, 1_000, 12_000, 10_000));
+        assert!(!should_exit_idle(0, 0, 5_000, 12_000, 10_000));
     }
 
     #[test]

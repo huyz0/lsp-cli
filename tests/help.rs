@@ -80,3 +80,22 @@ fn outline_rejects_scope_instead_of_silently_ignoring_it() {
         result.stderr
     );
 }
+
+/// `lsp ... | head` closes the pipe before we finish writing. That used to
+/// panic with a backtrace on stderr ("failed printing to stdout: Broken
+/// pipe").
+#[test]
+fn a_closed_stdout_is_not_a_panic() {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lsp"))
+        .args(["schema"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // the reader goes away before any output
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.code(), Some(141), "{stderr}");
+}

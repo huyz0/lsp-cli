@@ -113,7 +113,12 @@ impl OutputFormat {
         }
     }
 
-    pub fn reference(&self, locations: &[Location]) -> String {
+    /// `total` is the number of references before paging, and
+    /// `truncated` says whether more follow this page — what `search`
+    /// already reported. A JSON caller used to learn about truncation only
+    /// from a stderr notice, which an MCP client or a script reading stdout
+    /// never sees.
+    pub fn reference(&self, locations: &[Location], total: usize, start_index: usize) -> String {
         match self {
             OutputFormat::Json => json!({
                 "kind": "reference",
@@ -121,7 +126,10 @@ impl OutputFormat {
                     "uri": uri_to_path(&l.uri),
                     "line": l.range.start.line + 1,
                     "character": l.range.start.character,
-                })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>(),
+                "total": total,
+                "startIndex": start_index,
+                "truncated": start_index.saturating_add(locations.len()) < total,
             })
             .to_string(),
             OutputFormat::Markdown => {
@@ -134,7 +142,7 @@ impl OutputFormat {
                     .map(|(i, l)| {
                         format!(
                             "{}. {}:{}",
-                            i + 1,
+                            i + start_index + 1,
                             uri_to_path(&l.uri),
                             l.range.start.line + 1
                         )
@@ -347,9 +355,11 @@ impl OutputFormat {
     ///
     /// `total` and `start_index` are reported in JSON so a caller can tell
     /// whether more results exist without comparing counts by hand.
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query: &str,
+        backend: &str,
         page: &[SymbolInformation],
         total: usize,
         start_index: usize,
@@ -368,6 +378,7 @@ impl OutputFormat {
                 })).collect::<Vec<_>>(),
                 "total": total,
                 "startIndex": start_index,
+                "backend": backend,
             })
             .to_string(),
             OutputFormat::Markdown => {
@@ -515,7 +526,7 @@ mod tests {
                 },
             },
         };
-        let out = OutputFormat::Markdown.reference(&[loc.clone(), loc]);
+        let out = OutputFormat::Markdown.reference(&[loc.clone(), loc], 2, 0);
         assert!(out.starts_with("1. /a.rs:1"));
         assert!(out.contains("2. /a.rs:1"));
     }
@@ -658,15 +669,46 @@ mod tests {
     }
 
     #[test]
+    fn json_reference_reports_total_start_index_and_truncation() {
+        let loc = Location {
+            uri: "file:///a.ts".into(),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+        };
+        let page = vec![loc.clone(), loc];
+        let v: serde_json::Value =
+            serde_json::from_str(&OutputFormat::Json.reference(&page, 5, 2)).unwrap();
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["startIndex"], 2);
+        assert_eq!(v["truncated"], true);
+        let v: serde_json::Value =
+            serde_json::from_str(&OutputFormat::Json.reference(&page, 4, 2)).unwrap();
+        assert_eq!(v["truncated"], false);
+        // Markdown numbering continues from the page offset, like search's.
+        assert!(OutputFormat::Markdown
+            .reference(&page, 4, 2)
+            .starts_with("3. /a.ts:1"));
+    }
+
+    #[test]
     fn json_search_reports_total_and_start_index() {
         // These are what let a caller detect truncation without counting.
         let page = vec![symbol("User", 3)];
-        let out = OutputFormat::Json.search("User", &page, 42, 20, 40);
+        let out = OutputFormat::Json.search("User", "bm25", &page, 42, 20, 40);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["kind"], "search");
         assert_eq!(v["query"], "User");
         assert_eq!(v["total"], 42);
         assert_eq!(v["startIndex"], 20);
+        assert_eq!(v["backend"], "bm25");
         assert_eq!(v["items"][0]["name"], "User");
         assert_eq!(v["items"][0]["kind"], "class");
         assert_eq!(v["items"][0]["line"], 4);
@@ -674,7 +716,7 @@ mod tests {
 
     #[test]
     fn search_paths_are_percent_decoded() {
-        let out = OutputFormat::Json.search("User", &[symbol("User", 0)], 1, 0, 20);
+        let out = OutputFormat::Json.search("User", "lsp", &[symbol("User", 0)], 1, 0, 20);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["items"][0]["uri"], "/my project/a.ts");
     }
@@ -682,14 +724,14 @@ mod tests {
     #[test]
     fn markdown_search_numbers_results_from_the_page_offset() {
         let page = vec![symbol("A", 0), symbol("B", 1)];
-        let out = OutputFormat::Markdown.search("q", &page, 2, 20, 40);
+        let out = OutputFormat::Markdown.search("q", "bm25", &page, 2, 20, 40);
         assert!(out.starts_with("21. [class] A"), "got: {out}");
         assert!(out.contains("22. [class] B"));
     }
 
     #[test]
     fn markdown_search_says_when_more_results_remain() {
-        let out = OutputFormat::Markdown.search("q", &[symbol("A", 0)], 10, 0, 20);
+        let out = OutputFormat::Markdown.search("q", "bm25", &[symbol("A", 0)], 10, 0, 20);
         assert!(out.contains("9 more"), "got: {out}");
         assert!(out.contains("--start-index 20"));
     }
@@ -697,7 +739,7 @@ mod tests {
     #[test]
     fn markdown_search_with_no_results_says_so() {
         assert_eq!(
-            OutputFormat::Markdown.search("q", &[], 0, 0, 20),
+            OutputFormat::Markdown.search("q", "bm25", &[], 0, 0, 20),
             "No matches found."
         );
     }

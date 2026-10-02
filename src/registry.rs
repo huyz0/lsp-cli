@@ -268,6 +268,22 @@ pub struct Detected {
     pub root: PathBuf,
 }
 
+/// The nearest directory at or above `dir` that holds any language's root
+/// marker or a `.git`. Nearest wins: searching for a marker all the way up
+/// before considering `.git` let a stray `~/package.json` beat the
+/// repository one level up, and turned a search into an index of the
+/// entire home directory.
+pub fn find_project_root_upwards(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| {
+            d.join(".git").exists()
+                || languages()
+                    .iter()
+                    .any(|l| l.root_markers.iter().any(|m| d.join(m).exists()))
+        })
+        .map(Path::to_path_buf)
+}
+
 /// `detect_project_root`, also accepting a bare directory, for which it
 /// probes common entry files. What `server start <dir>` needs.
 ///

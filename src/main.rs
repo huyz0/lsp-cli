@@ -556,6 +556,7 @@ async fn main() {
         return;
     }
 
+    quiet_on_closed_stdout();
     let argv = inject_json_args(raw_argv);
     let cli = Cli::parse_from(argv);
 
@@ -563,6 +564,32 @@ async fn main() {
         eprintln!("lsp: {e}");
         std::process::exit(1);
     }
+}
+
+/// Exit quietly when whoever reads our stdout stops reading
+/// (`lsp search x | head`).
+///
+/// Rust ignores SIGPIPE, so `println!` into a closed pipe panics with
+/// "failed printing to stdout: Broken pipe" and a backtrace on stderr.
+/// Restoring SIGPIPE's default would also apply to the CLI's writes to the
+/// daemon socket, turning a reset connection (which is retried) into a
+/// silent death, so the panic itself is intercepted instead. 141 is what a
+/// SIGPIPE-killed process reports (128 + 13), which shells and pipelines
+/// already treat as "the reader went away".
+fn quiet_on_closed_stdout() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.contains("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        default(info);
+    }));
 }
 
 async fn run(cli: Cli) -> Result<()> {

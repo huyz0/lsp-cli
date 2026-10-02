@@ -235,3 +235,80 @@ fn server_start_resolves_a_relative_path_against_the_caller() {
         "{data}"
     );
 }
+
+/// `search` used to start a language server for the first source file it
+/// found — a full rust-analyzer as a side effect of a name lookup. With
+/// nothing warm it now answers from its own index and starts nothing.
+#[test]
+fn search_never_starts_a_server_and_uses_one_that_is_warm() {
+    let p = project("search-warm", "fn needle_here() {}\n");
+    let log = p.home.path().join("server.log");
+    let r = p.run_in(&p.dir, &["search", "needle"]);
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let data: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(data["backend"], "bm25", "{data}");
+    assert_eq!(data["items"][0]["name"], "needle_here", "{data}");
+    assert!(!log.exists(), "search started a language server");
+
+    // Once a navigation command has warmed one, search asks it.
+    ok(&p, &["outline", &p.file()]);
+    let r = p.run_in(&p.dir, &["search", "needle"]);
+    let data: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(data["backend"], "lsp", "{data}");
+    assert_eq!(data["items"][0]["containerName"], "from-fake-lsp", "{data}");
+}
+
+/// From a subdirectory, search used to treat that subdirectory as the
+/// project (it only probed for index.ts/main.go/main.py in the current
+/// directory).
+#[test]
+fn search_from_a_subdirectory_covers_the_whole_project() {
+    let p = project("search-subdir", "fn top_level_thing() {}\n");
+    let sub = p.dir.join("deep").join("er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let r = p.run_in(&sub, &["search", "top_level"]);
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let data: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(data["items"][0]["name"], "top_level_thing", "{data}");
+}
+
+/// Outside any project, search indexed whatever directory it was run
+/// from — all of /tmp, say. For the temp dir, home and / it now refuses.
+#[test]
+fn search_outside_any_project_refuses_to_index_the_temp_dir() {
+    let p = project("search-tmp", "fn a() {}\n");
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    if support::find_marker_upwards(&tmp) {
+        eprintln!("skipping: the temp dir is itself inside a project");
+        return;
+    }
+    let r = p.run_in(&tmp, &["search", "anything"]);
+    assert_eq!(r.exit_code, 1, "{}", r.stdout);
+    assert!(r.stderr.contains("--project"), "{}", r.stderr);
+}
+
+/// A stray `~/package.json` used to win over a repository's `.git` one
+/// level up, so searching from inside the repository indexed the whole
+/// home directory. The nearest root marker or `.git` wins, and a root that
+/// turns out to be the home directory itself is refused.
+#[test]
+fn search_prefers_the_nearest_root_and_never_indexes_home() {
+    let p = project("search-home", "fn a() {}\n");
+    let home = p.home.path().join("fakehome");
+    let repo = home.join("code").join("scripts");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(home.join("Downloads")).unwrap();
+    std::fs::write(home.join("package.json"), "{}").unwrap();
+    std::fs::write(repo.join("tool.py"), "def needle_in_repo():\n    pass\n").unwrap();
+    std::fs::write(home.join("Downloads").join("b.py"), "def needle_elsewhere():\n    pass\n").unwrap();
+    p.set_env("HOME", &home.display().to_string());
+
+    let r = p.run_in(&repo, &["search", "needle"]);
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("needle_in_repo"), "{}", r.stdout);
+    assert!(!r.stdout.contains("needle_elsewhere"), "indexed beyond the repo: {}", r.stdout);
+
+    let r = p.run_in(&home.join("Downloads"), &["search", "needle"]);
+    assert_eq!(r.exit_code, 1, "searched the home directory: {}", r.stdout);
+    assert!(r.stderr.contains("home directory"), "{}", r.stderr);
+}

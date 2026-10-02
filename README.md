@@ -168,6 +168,9 @@ Values above are the defaults. All durations are in **seconds**.
   sits idle before the background daemon shuts it down.
 - `managerTimeout` (default 60): how long to wait for the daemon to come up
   before giving up.
+- `daemonIdleTimeout` (default: `idleTimeout`): how long the daemon
+  itself stays up once it has no servers and nobody is talking to it. It
+  also exits as soon as its socket file is deleted or replaced.
 - `defaultMaxItems` (default 20): page size for `reference` and `search`
   when `--max-items` isn't given.
 - `usePathServers` (default true): when a language's server isn't in

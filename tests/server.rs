@@ -351,3 +351,51 @@ fn a_command_right_after_shutdown_starts_a_fresh_daemon() {
         assert_eq!(next.exit_code, 0, "{}", next.stderr);
     }
 }
+
+/// A daemon with no servers and no requests exits after
+/// `daemonIdleTimeout` instead of running forever.
+#[test]
+fn an_idle_daemon_with_nothing_to_serve_exits() {
+    let home = isolated_home("idle-exit");
+    std::fs::write(
+        home.path().join("config.json"),
+        r#"{"daemonIdleTimeout": 1}"#,
+    )
+    .unwrap();
+    assert_eq!(lsp_in(&home, &["server", "list"]).exit_code, 0);
+    let socket = home.path().join("manager.sock");
+    assert!(socket.exists());
+    wait_until_secs(|| !socket.exists(), "the idle daemon to exit", 10);
+    // And the next command simply starts a new one.
+    assert_eq!(lsp_in(&home, &["server", "list"]).exit_code, 0);
+}
+
+/// A daemon whose socket has been deleted (its state directory removed,
+/// say) can never be reached again. It used to keep running, with its
+/// language servers, forever; now it shuts them down and exits.
+#[test]
+fn a_daemon_whose_socket_is_gone_shuts_its_servers_down_and_exits() {
+    let project = support::FakeServerProject::new("orphan", "fn a() {}\n", &[]);
+    let log = project.home.path().join("server.log");
+    project.set_env("FAKE_LSP_LOG", &log.display().to_string());
+    // Fast reaper; the running server keeps the idle rule from firing.
+    std::fs::write(
+        project.home.path().join("config.json"),
+        r#"{"daemonIdleTimeout": 2}"#,
+    )
+    .unwrap();
+    let out = project.run(&["outline", &project.file()]);
+    assert_eq!(out.exit_code, 0, "{}", out.stderr);
+
+    std::fs::remove_file(project.home.path().join("manager.sock")).unwrap();
+    wait_until_secs(
+        || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .any(|m| m == "shutdown")
+        },
+        "the orphaned daemon to shut its server down",
+        15,
+    );
+}

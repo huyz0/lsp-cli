@@ -173,10 +173,11 @@ Default page size is 20, configurable as `defaultMaxItems`.
 lsp reference src/models.ts --scope User --max-items 20 --start-index 20
 ```
 
-`search`'s JSON reports `total` and `startIndex`, so you can tell whether
-more results exist. **`reference`'s JSON does not**: its "N more
-results" notice goes to stderr. If you are capturing stdout only, compare the
-number of locations against `--max-items` to detect truncation.
+Both report `total` and `startIndex` in their JSON, and `reference` also
+`truncated` (true when more results follow this page), so you can tell
+whether to ask for the next page. With an LSP backend, `search`'s `total`
+is whatever the server returned, and servers cap it (rust-analyzer at 128),
+so narrow the query rather than paging deep.
 
 `--pagination-id` is accepted but does nothing; each call re-queries.
 
@@ -190,11 +191,17 @@ lsp search "User" --kinds class --kinds interface
 `method`, `variable`, `constant`, `enum`, `struct`, and the other LSP
 symbol kinds. An invalid one is an error, not an empty result.
 
-`search` needs a project to search. Run it from inside the project, or
-pass `--project <path>`. It uses the language server's workspace symbol
-index when one answers, and falls back to a built-in text index otherwise.
-The fallback finds fewer things and ranks them less precisely, so prefer
-running from a real project root.
+`search` covers the project around the current directory (the nearest
+directory above it with a root marker such as `package.json`, `Cargo.toml`,
+`go.mod`, or `.git`), or `--project <path>`. Outside any project it refuses
+to run from your home directory, `/` or the temp directory.
+
+It asks a language server already running for that project (any earlier
+`outline`, `definition`, ... warms one), and otherwise answers from a
+built-in index without starting one. The JSON says which: `"backend":
+"lsp"` or `"bm25"`. The built-in index finds fewer things and ranks them
+less precisely; if you need the server's answer, run any navigation
+command on a file in the project first.
 
 ### `diagnostics`
 

@@ -180,9 +180,7 @@ impl WatcherManager {
             while let Some(first) = event_rx.recv().await {
                 let flush_by = std::time::Instant::now() + MAX_BATCH_WINDOW;
                 maintain_watches(&watcher_ref, &first).await;
-                if let Some(v) = to_change(&first, &root, &extensions) {
-                    pending.push(v);
-                }
+                pending.extend(to_change(&first, &root, &extensions));
                 loop {
                     // The debounce window re-arms on every event, so a
                     // continuous stream (a build, an `npm install`) could
@@ -197,17 +195,15 @@ impl WatcherManager {
                     match tokio::time::timeout(window, event_rx.recv()).await {
                         Ok(Some(e)) => {
                             maintain_watches(&watcher_ref, &e).await;
-                            if let Some(v) = to_change(&e, &root, &extensions) {
-                                pending.push(v);
-                            }
+                            pending.extend(to_change(&e, &root, &extensions));
                         }
                         // Quiet for a full debounce window, or the sender
                         // is gone; either way the batch is done.
                         Ok(None) | Err(_) => break,
                     }
                 }
-                if !pending.is_empty() {
-                    let changes = std::mem::take(&mut pending);
+                let changes = coalesce(std::mem::take(&mut pending));
+                if !changes.is_empty() {
                     eprintln!(
                         "[watcher] {} change(s) detected in {root}, notifying live servers",
                         changes.len()
@@ -236,20 +232,43 @@ impl WatcherManager {
 }
 
 /// LSP `FileChangeType`: 1 = Created, 2 = Changed, 3 = Deleted.
+///
+/// A rename becomes a deletion of the old path and a creation of the new
+/// one, which is what it is to a language server: inotify reports it as
+/// `Name(From)` + `Name(To)` (and/or `Name(Both)` with both paths), and
+/// every one of those used to be sent as "Changed" — the old path was never
+/// reported gone, and the new one never reported new. A rename with no
+/// stated direction (`Name(Any)`, as on macOS) is decided by whether the
+/// path still exists.
 fn to_change(
     event: &notify::Event,
     project_root: &str,
     extensions: &HashSet<String>,
-) -> Option<Value> {
-    // A rename delivers `[from, to]`; the destination is the path that now
-    // exists and is what a server needs told about. Taking only
-    // `paths.first()` meant a file renamed *into* the project was reported
-    // as a change to its old name and the new file was never announced.
-    let path = match event.kind {
-        EventKind::Modify(ModifyKind::Name(_)) if event.paths.len() > 1 => event.paths.last()?,
-        _ => event.paths.first()?,
+) -> Vec<Value> {
+    use notify::event::RenameMode;
+    let typed: Vec<(&std::path::PathBuf, u8)> = match event.kind {
+        EventKind::Create(_) => event.paths.iter().map(|p| (p, 1)).collect(),
+        EventKind::Remove(_) => event.paths.iter().map(|p| (p, 3)).collect(),
+        EventKind::Modify(ModifyKind::Name(mode)) => match (mode, event.paths.as_slice()) {
+            (RenameMode::Both, [from, to, ..]) => vec![(from, 3), (to, 1)],
+            (RenameMode::From, paths) => paths.iter().map(|p| (p, 3)).collect(),
+            (RenameMode::To, paths) => paths.iter().map(|p| (p, 1)).collect(),
+            (_, paths) => paths
+                .iter()
+                .map(|p| (p, if p.exists() { 1 } else { 3 }))
+                .collect(),
+        },
+        EventKind::Modify(_) => event.paths.iter().map(|p| (p, 2)).collect(),
+        _ => vec![],
     };
+    typed
+        .into_iter()
+        .filter(|(path, _)| is_relevant(path, project_root, extensions))
+        .map(|(path, ty)| json!({ "uri": lsp::uri::from_path(path), "type": ty }))
+        .collect()
+}
 
+fn is_relevant(path: &Path, project_root: &str, extensions: &HashSet<String>) -> bool {
     // Ignore checks run against the path *relative to the project root*.
     // Testing the absolute path meant a project that merely lives under a
     // dot-directory — `~/.config/nvim`, `~/.dotfiles` — matched on its own
@@ -261,22 +280,48 @@ fn to_change(
         .split('/')
         .any(|c| c.starts_with('.') || matches!(c, "node_modules" | "dist" | "build" | "target"))
     {
-        return None;
+        return false;
     }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| extensions.contains(&format!(".{}", e.to_lowercase())))
+}
 
-    let ext = format!(".{}", path.extension()?.to_str()?.to_lowercase());
-    if !extensions.contains(&ext) {
-        return None;
+/// Collapses a batch to at most one change per URI, in first-seen order.
+///
+/// Saving one file repeatedly (or a build rewriting it) produced one entry
+/// per write — 300 appends, 300 "Changed" notifications for a single
+/// file. What a server needs is the net effect: created-then-changed is
+/// created, deleted-then-created is a change, and otherwise the latest
+/// wins. Created-then-deleted is reported as deleted rather than dropped: a
+/// "created" can come from a rename onto a file the server already knew (an
+/// editor's atomic save), and deleting a file a server never heard of is
+/// harmless.
+fn coalesce(changes: Vec<Value>) -> Vec<Value> {
+    let mut order: Vec<String> = vec![];
+    let mut net: HashMap<String, Option<u64>> = HashMap::new();
+    for change in changes {
+        let (Some(uri), Some(ty)) = (change["uri"].as_str(), change["type"].as_u64()) else {
+            continue;
+        };
+        let merged = match net.get(uri).copied().flatten() {
+            None => Some(ty),
+            Some(1) if ty == 2 => Some(1),
+            Some(3) if ty == 1 => Some(2),
+            Some(_) => Some(ty),
+        };
+        if !net.contains_key(uri) {
+            order.push(uri.to_string());
+        }
+        net.insert(uri.to_string(), merged);
     }
-
-    let ty = match event.kind {
-        EventKind::Create(_) => 1,
-        EventKind::Modify(_) => 2,
-        EventKind::Remove(_) => 3,
-        _ => return None,
-    };
-
-    Some(json!({ "uri": lsp::uri::from_path(path), "type": ty }))
+    order
+        .into_iter()
+        .filter_map(|uri| {
+            let ty = net.get(&uri).copied().flatten()?;
+            Some(json!({ "uri": uri, "type": ty }))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -300,8 +345,7 @@ mod tests {
                 &evt(EventKind::Create(CreateKind::File), "/p/a.ts"),
                 "/p",
                 &exts
-            )
-            .unwrap()["type"],
+            )[0]["type"],
             1
         );
         assert_eq!(
@@ -309,8 +353,7 @@ mod tests {
                 &evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"),
                 "/p",
                 &exts
-            )
-            .unwrap()["type"],
+            )[0]["type"],
             2
         );
         assert_eq!(
@@ -318,8 +361,7 @@ mod tests {
                 &evt(EventKind::Remove(RemoveKind::File), "/p/a.ts"),
                 "/p",
                 &exts
-            )
-            .unwrap()["type"],
+            )[0]["type"],
             3
         );
     }
@@ -332,7 +374,7 @@ mod tests {
             "/p",
             &exts
         )
-        .is_none());
+        .is_empty());
     }
 
     #[test]
@@ -343,19 +385,19 @@ mod tests {
             "/p",
             &exts
         )
-        .is_none());
+        .is_empty());
         assert!(to_change(
             &evt(EventKind::Modify(ModifyKind::Any), "/p/node_modules/a.ts"),
             "/p",
             &exts
         )
-        .is_none());
+        .is_empty());
         assert!(to_change(
             &evt(EventKind::Modify(ModifyKind::Any), "/p/dist/a.ts"),
             "/p",
             &exts
         )
-        .is_none());
+        .is_empty());
     }
 
     #[test]
@@ -365,9 +407,8 @@ mod tests {
             &evt(EventKind::Modify(ModifyKind::Any), "/p/a.ts"),
             "/p",
             &exts,
-        )
-        .unwrap();
-        assert_eq!(v["uri"], "file:///p/a.ts");
+        );
+        assert_eq!(v[0]["uri"], "file:///p/a.ts");
     }
 
     #[test]
@@ -385,7 +426,7 @@ mod tests {
             "/home/u/.config/nvim",
             &exts,
         );
-        assert!(v.is_some(), "event under a dot-directory root was dropped");
+        assert_eq!(v.len(), 1, "event under a dot-directory root was dropped");
     }
 
     #[test]
@@ -399,25 +440,119 @@ mod tests {
             "/home/u/.config/nvim",
             &exts,
         )
-        .is_none());
+        .is_empty());
+    }
+
+    fn rename(mode: RenameMode, paths: &[&str]) -> notify::Event {
+        notify::Event {
+            kind: EventKind::Modify(ModifyKind::Name(mode)),
+            paths: paths.iter().map(std::path::PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    fn summary(changes: &[Value]) -> Vec<(String, u64)> {
+        changes
+            .iter()
+            .map(|c| {
+                (
+                    c["uri"].as_str().unwrap().to_string(),
+                    c["type"].as_u64().unwrap(),
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn a_rename_reports_the_destination_not_the_source() {
-        // notify delivers [from, to]. Reporting `from` told the server
-        // about a path that no longer exists and never mentioned the file
-        // that now does.
+    fn a_rename_is_a_deletion_of_the_old_path_and_a_creation_of_the_new() {
+        // Every rename event used to be reported as "Changed": the old
+        // path was never said to be gone and the new one never said to
+        // exist.
         let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
-        let event = notify::Event {
-            kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
-            paths: vec![
-                std::path::PathBuf::from("/p/old.ts"),
-                std::path::PathBuf::from("/p/new.ts"),
-            ],
-            attrs: Default::default(),
-        };
-        let v = to_change(&event, "/p", &exts).unwrap();
-        assert_eq!(v["uri"], "file:///p/new.ts");
+        let both = to_change(
+            &rename(RenameMode::Both, &["/p/old.ts", "/p/new.ts"]),
+            "/p",
+            &exts,
+        );
+        assert_eq!(
+            summary(&both),
+            [
+                ("file:///p/old.ts".into(), 3),
+                ("file:///p/new.ts".into(), 1)
+            ]
+        );
+        let from = to_change(&rename(RenameMode::From, &["/p/old.ts"]), "/p", &exts);
+        assert_eq!(summary(&from), [("file:///p/old.ts".into(), 3)]);
+        let to = to_change(&rename(RenameMode::To, &["/p/new.ts"]), "/p", &exts);
+        assert_eq!(summary(&to), [("file:///p/new.ts".into(), 1)]);
+        // inotify sends From, To and Both for one `mv`; coalesced, that is
+        // exactly one deletion and one creation.
+        let all: Vec<Value> = [from, to, both].concat();
+        assert_eq!(
+            summary(&coalesce(all)),
+            [
+                ("file:///p/old.ts".into(), 3),
+                ("file:///p/new.ts".into(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undirected_rename_is_judged_by_whether_the_path_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("here.ts");
+        std::fs::write(&present, "").unwrap();
+        let gone = dir.path().join("gone.ts");
+        let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
+        let root = dir.path().to_str().unwrap();
+        let v = to_change(
+            &rename(RenameMode::Any, &[present.to_str().unwrap()]),
+            root,
+            &exts,
+        );
+        assert_eq!(v[0]["type"], 1);
+        let v = to_change(
+            &rename(RenameMode::Any, &[gone.to_str().unwrap()]),
+            root,
+            &exts,
+        );
+        assert_eq!(v[0]["type"], 3);
+    }
+
+    #[test]
+    fn a_rename_out_of_the_watched_extensions_reports_only_the_relevant_side() {
+        let exts: HashSet<String> = [".ts"].iter().map(|s| s.to_string()).collect();
+        let v = to_change(
+            &rename(RenameMode::Both, &["/p/a.ts", "/p/a.ts.bak"]),
+            "/p",
+            &exts,
+        );
+        assert_eq!(summary(&v), [("file:///p/a.ts".into(), 3)]);
+    }
+
+    #[test]
+    fn coalesce_keeps_one_net_change_per_file_in_first_seen_order() {
+        let c = |uri: &str, ty: u64| json!({ "uri": uri, "type": ty });
+        let repeated: Vec<Value> = (0..300).map(|_| c("file:///a", 2)).collect();
+        assert_eq!(summary(&coalesce(repeated)), [("file:///a".into(), 2)]);
+        let batch = vec![
+            c("file:///new", 1),
+            c("file:///b", 2),
+            c("file:///new", 2), // created then written: still created
+            c("file:///tmp", 1),
+            c("file:///tmp", 3), // created and gone again: gone
+            c("file:///x", 3),
+            c("file:///x", 1), // deleted and recreated: changed
+        ];
+        assert_eq!(
+            summary(&coalesce(batch)),
+            [
+                ("file:///new".into(), 1),
+                ("file:///b".into(), 2),
+                ("file:///tmp".into(), 3),
+                ("file:///x".into(), 2)
+            ]
+        );
     }
 
     #[test]
@@ -427,9 +562,8 @@ mod tests {
             &evt(EventKind::Modify(ModifyKind::Any), "/my proj/a.ts"),
             "/my proj",
             &exts,
-        )
-        .unwrap();
-        assert_eq!(v["uri"], "file:///my%20proj/a.ts");
+        );
+        assert_eq!(v[0]["uri"], "file:///my%20proj/a.ts");
     }
 
     // --- watch registration -------------------------------------------

@@ -126,6 +126,16 @@ while True:
                  "location": {"uri": uri, "range": s["range"]}}
                 for s in result
             ]
+    elif method == "workspace/symbol":
+        query = params.get("query", "")
+        result = [
+            {"name": s["name"], "kind": s["kind"],
+             "location": {"uri": uri, "range": s["range"]},
+             "containerName": "from-fake-lsp"}
+            for uri, text in docs.items()
+            for s in symbols(text)
+            if query in s["name"]
+        ]
     elif method == "textDocument/prepareCallHierarchy":
         uri = params["textDocument"]["uri"]
         line = params["position"]["line"]
