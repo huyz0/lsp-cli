@@ -37,7 +37,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-dirs = "5"
+dirs = "7"
 regex = "1"
 axum = "0.8.9"
 hyper-util = { version = "0.1.20", features = ["server", "tokio", "http1"] }
@@ -46,9 +46,9 @@ sha2 = "0.11.0"
 chrono = "0.4.45"
 walkdir = "2.5.0"
 hyper = { version = "1.10.1", features = ["server", "http1"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-thiserror = "1"
-notify = "6"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+thiserror = "2"
+notify = "8"
 # `file:` URI escaping/unescaping (src/uri.rs). Already in the tree via
 # reqwest/url; depended on directly now that we build and parse URIs
 # ourselves rather than string-concatenating them.
@@ -59,11 +59,11 @@ percent-encoding = "2"
 # only ever implements the client side).
 lsp-server = "0.10"
 lsp-types = "0.97"
-tree-sitter = "0.24"
+tree-sitter = "0.27"
 tree-sitter-json = "0.24"
-tree-sitter-css = "0.23"
+tree-sitter-css = "0.25"
 tree-sitter-html = "0.23"
-tree-sitter-bash = "0.23"
+tree-sitter-bash = "0.25"
 
 [dev-dependencies]
 tempfile = "3"
