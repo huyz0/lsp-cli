@@ -147,7 +147,15 @@ impl ManagerClient {
             .open(&log_path);
 
         let exe = std::env::current_exe()?;
-        std::process::Command::new(exe)
+        let mut command = std::process::Command::new(exe);
+        // Its own process group, so it is not part of the job that spawned
+        // it. Sharing the CLI's group meant Ctrl-C on whatever command
+        // happened to start the daemon (or on the agent running it)
+        // delivered SIGINT to the daemon too, and it shut down every warm
+        // server with it.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command
             .arg("--daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -195,8 +203,14 @@ impl ManagerClient {
         &self,
         path: &str,
         project_root: Option<&str>,
+        server_path: Option<&std::path::Path>,
     ) -> Result<ManagedServerInfo> {
-        let body = serde_json::json!({ "path": path, "project_root": project_root }).to_string();
+        let body = serde_json::json!({
+            "path": path,
+            "project_root": project_root,
+            "server_path": server_path.map(|p| p.to_string_lossy()),
+        })
+        .to_string();
         let (status, resp) = raw_request("POST", "/create", Some(body)).await?;
         if status != 200 {
             bail!("{resp}");

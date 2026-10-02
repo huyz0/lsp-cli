@@ -61,6 +61,15 @@ pub struct CreateRequest {
     /// command with "No server running for project: <root>".
     #[serde(default)]
     pub project_root: Option<String>,
+    /// The server binary the CLI already resolved and validated (see
+    /// `install::ensure_installed`). The daemon's own environment can
+    /// differ from the CLI's — it may have been started from a GUI editor
+    /// with a minimal `PATH` — so re-resolving here could pick a different
+    /// binary, or none. Absent for bundled servers and deno, and from
+    /// callers that didn't check (`server start`, search warm-up), where
+    /// the daemon falls back to `registry::server_path`.
+    #[serde(default)]
+    pub server_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -180,6 +189,7 @@ impl Manager {
         &self,
         path: &str,
         project_root_override: Option<&str>,
+        server_path_override: Option<&str>,
     ) -> Result<ManagedServerInfo> {
         let file_path = std::path::Path::new(path);
         let detected = detect_project_root(file_path)
@@ -215,22 +225,50 @@ impl Manager {
         // actually work: a cached entry whose underlying process has died
         // (crashed, OOM-killed, `kill -9`'d externally) is detected here and
         // evicted instead of being handed back as if it were still good.
-        {
+        //
+        // The `servers` map lock is *not* held while checking liveness.
+        // Checking needs the client's own lock, which an in-flight request
+        // holds for up to the 120s request ceiling; holding the map lock
+        // across that wait stalled every `/list`, `/request` and `/notify`
+        // for every project in the daemon — including the CLI's own
+        // `is_alive()` probe, which is a `/list`. A client that is busy
+        // answering a request is, for this purpose, alive: if it dies
+        // mid-request that request fails and the next `create` evicts it.
+        let existing = self
+            .servers
+            .lock()
+            .await
+            .get(&key)
+            .map(|e| e.client.clone());
+        if let Some(client) = existing {
+            let alive = match client.try_lock() {
+                Ok(mut c) => c.is_alive(),
+                Err(_) => true,
+            };
             let mut servers = self.servers.lock().await;
-            if let Some(existing) = servers.get_mut(&key) {
-                let alive = existing.client.lock().await.is_alive();
-                if alive {
-                    existing.info.idle_since = now_ms();
-                    let mut info = existing.info.clone();
-                    info.just_started = false;
-                    return Ok(info);
-                }
+            // Only act on the entry we inspected: the reaper may have
+            // replaced or removed it in between (we hold the per-key create
+            // lock, so nothing else can have *inserted* one).
+            let same = servers
+                .get(&key)
+                .is_some_and(|e| Arc::ptr_eq(&e.client, &client));
+            if same && alive {
+                let entry = servers.get_mut(&key).expect("checked above");
+                entry.info.idle_since = now_ms();
+                let mut info = entry.info.clone();
+                info.just_started = false;
+                return Ok(info);
+            }
+            if same {
                 servers.remove(&key);
             }
         }
 
         let install_dir = default_install_dir();
-        let bin = server_path(detected.lang.server_bin, &install_dir);
+        let bin = match server_path_override {
+            Some(p) => std::path::PathBuf::from(p),
+            None => server_path(detected.lang.server_bin, &install_dir),
+        };
         let args = (detected.lang.server_args)(&root);
 
         let mut info = ManagedServerInfo {
@@ -744,10 +782,14 @@ async fn create_handler(
     State(m): State<SharedManager>,
     Json(req): Json<CreateRequest>,
 ) -> Result<Json<ManagedServerInfo>, (axum::http::StatusCode, String)> {
-    m.create(&req.path, req.project_root.as_deref())
-        .await
-        .map(Json)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    m.create(
+        &req.path,
+        req.project_root.as_deref(),
+        req.server_path.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn delete_handler(
@@ -914,6 +956,10 @@ pub async fn start_daemon() -> Result<()> {
     let router = app(manager);
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // The daemon outlives the terminal that started it. Without a handler,
+    // SIGHUP's default action killed it, skipping the socket cleanup below.
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::spawn(async move { while sighup.recv().await.is_some() {} });
     tokio::select! {
         res = serve_uds(listener, router) => { res?; }
         _ = tokio::signal::ctrl_c() => {}
@@ -925,7 +971,18 @@ pub async fn start_daemon() -> Result<()> {
 
 async fn serve_uds(listener: tokio::net::UnixListener, router: Router) -> Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        // A failed `accept` is about that one connection (or a transient
+        // resource limit such as EMFILE), not the listener. Returning it
+        // used to shut the whole daemon down, taking every warm server
+        // with it. Back off briefly so a persistent condition can't spin.
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                eprintln!("[daemon] accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
         let router = router.clone();
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);

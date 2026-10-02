@@ -88,13 +88,118 @@ fn is_managed(language: &str) -> bool {
 /// Writes a `#!/bin/sh` wrapper at `wrapper_path` that execs `node <entry> "$@"`.
 fn write_node_wrapper(wrapper_path: &Path, entry: &Path) -> Result<()> {
     let script = format!("#!/bin/sh\nexec node \"{}\" \"$@\"\n", entry.display());
-    std::fs::write(wrapper_path, script)?;
+    write_executable_atomically(wrapper_path, script.as_bytes())
+}
+
+/// Child-process stdout, sent to our stderr instead.
+///
+/// Installs run in the middle of navigation commands (auto-install on first
+/// use), whose stdout is a JSON document an agent parses — and, under `lsp
+/// mcp`, the text of a tool result. `npm install` printing "added 1
+/// package" into that stream is exactly the corruption this prevents.
+fn stdout_to_stderr() -> std::process::Stdio {
+    std::process::Stdio::from(std::io::stderr())
+}
+
+/// Writes `contents` to `dest` as an executable, replacing whatever is
+/// there — including a symlink — without ever writing *through* it.
+///
+/// `std::fs::write` follows symlinks. A developer who symlinked their own
+/// global `typescript-language-server` (or rustup's `rust-analyzer`) into
+/// the servers directory had that global file overwritten by an install.
+/// Writing to a sibling temp file and renaming it into place replaces the
+/// directory entry itself, and also means a reader (a server being spawned
+/// concurrently) sees either the old file or the new one, never a
+/// half-written one.
+fn write_executable_atomically(dest: &Path, contents: &[u8]) -> Result<()> {
+    let dir = dest
+        .parent()
+        .ok_or_else(|| anyhow!("no parent directory for {}", dest.display()))?;
+    std::fs::create_dir_all(dir)?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o755);
+        }
+        let mut file = options.open(&tmp)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        file.sync_all()?;
+        drop(file);
+        make_executable(&tmp)?;
+        std::fs::rename(&tmp, dest)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// The first executable called `name` on `PATH`, if any.
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(wrapper_path, std::fs::Permissions::from_mode(0o755))?;
+        meta.permissions().mode() & 0o111 != 0
     }
-    Ok(())
+    #[cfg(not(unix))]
+    true
+}
+
+/// Serializes installs of one language across processes.
+///
+/// An agent typically fires several navigation commands at once, and on a
+/// fresh machine every one of them finds the server missing. Without this,
+/// each ran its own `npm install` into the same directory at the same time
+/// and they failed each other (`ENOTEMPTY`, or "entry point is missing"
+/// because another install was halfway through replacing it). The lock is
+/// released when the returned file is dropped (or the process dies).
+fn lock_install(language: &str) -> Result<std::fs::File> {
+    let dir = crate::paths::lsp_cli_home();
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("install-{language}.lock")))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            eprintln!(
+                "[lsp] Waiting for another install of the {language} language server to finish..."
+            );
+            file.lock()?;
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    Ok(file)
 }
 
 fn npm_install(packages: &[&str]) -> Result<()> {
@@ -104,6 +209,7 @@ fn npm_install(packages: &[&str]) -> Result<()> {
         .arg("install")
         .args(packages)
         .current_dir(&dir)
+        .stdout(stdout_to_stderr())
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
@@ -138,17 +244,39 @@ fn check_installed_present(rel: PathBuf) -> Option<String> {
         .then(|| "installed".to_string())
 }
 
+/// How long a version probe may take. These now run against arbitrary
+/// binaries found on `PATH`, and one that waits for input instead of
+/// printing a version must not hang every command that checks for it.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn run_binary_version(bin: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(bin).args(args).output().ok()?;
-    if !output.status.success() {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut stdout).ok()?;
+    let text = stdout.lines().next().unwrap_or_default().trim().to_string();
     if text.is_empty() {
         None
     } else {
@@ -197,7 +325,7 @@ fn npm_spec(language: &str) -> Option<NpmSpec> {
 fn install_npm(spec: &NpmSpec) -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!(
+    eprintln!(
         "Installing {} (npm install {})...",
         spec.wrapper_name,
         spec.packages.join(" ")
@@ -213,7 +341,6 @@ fn install_npm(spec: &NpmSpec) -> Result<PathBuf> {
     }
     let wrapper = install_dir.join(spec.wrapper_name);
     write_node_wrapper(&wrapper, &entry)?;
-    println!("\u{2713} Installed to {}", wrapper.display());
     Ok(wrapper)
 }
 
@@ -253,12 +380,13 @@ fn check_npm_version(spec: &NpmSpec) -> Option<String> {
 fn install_go() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Installing gopls via go install...");
+    eprintln!("Installing gopls via go install...");
     let gopath = go_dir();
     std::fs::create_dir_all(&gopath)?;
     let status = Command::new("go")
         .args(["install", "golang.org/x/tools/gopls@latest"])
         .env("GOPATH", &gopath)
+        .stdout(stdout_to_stderr())
         .status();
     match status {
         Ok(s) if s.success() => {}
@@ -281,7 +409,6 @@ fn install_go() -> Result<PathBuf> {
     std::os::unix::fs::symlink(&src, &dest)?;
     #[cfg(not(unix))]
     std::fs::copy(&src, &dest)?;
-    println!("\u{2713} Installed to {}", dest.display());
     Ok(dest)
 }
 
@@ -331,15 +458,36 @@ struct GithubRelease {
     assets: Vec<GithubAsset>,
 }
 
+/// An HTTP client that gives up instead of hanging.
+///
+/// Installs run inside navigation commands; with no timeout, a network that
+/// accepts the connection and then goes silent left the command (and the
+/// agent waiting on it) stuck forever. The read timeout bounds silence, not
+/// total duration, so a large archive on a slow but live link still
+/// completes.
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()?)
+}
+
 async fn fetch_latest_release(repo: &str) -> Result<GithubRelease> {
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let resp = client
         .get(&url)
         .header("User-Agent", "lsp-cli")
         .send()
         .await
-        .map_err(|e| anyhow!("failed to reach GitHub API ({url}): {e}"))?;
+        .map_err(|e| {
+            anyhow!(
+                "failed to reach GitHub API ({url}): {e}\n\
+                 If this machine is offline, install the server yourself and put it on PATH \
+                 (or in {}), then retry.",
+                default_install_dir().display()
+            )
+        })?;
     if !resp.status().is_success() {
         bail!(
             "Failed to fetch latest release for {repo}: HTTP {}",
@@ -368,7 +516,7 @@ fn unique_temp_dir() -> Result<PathBuf> {
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let resp = client
         .get(url)
         .header("User-Agent", "lsp-cli")
@@ -498,7 +646,7 @@ fn make_executable(_path: &Path) -> Result<()> {
 async fn install_from_release(spec: &ReleaseSpec) -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Fetching {} from GitHub Releases...", spec.display);
+    eprintln!("Fetching {} from GitHub Releases...", spec.display);
 
     let release = fetch_latest_release(spec.repo).await?;
     let filename = (spec.asset_name)(&release.tag_name)?;
@@ -508,7 +656,7 @@ async fn install_from_release(spec: &ReleaseSpec) -> Result<PathBuf> {
         .find(|a| a.name == filename)
         .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
-    println!("Downloading {filename}...");
+    eprintln!("Downloading {filename}...");
     let bytes = download_bytes(&asset.browser_download_url).await?;
     let temp_dir = unique_temp_dir()?;
     let archive = temp_dir.join(&filename);
@@ -527,7 +675,6 @@ async fn install_from_release(spec: &ReleaseSpec) -> Result<PathBuf> {
         );
     }
     make_executable(&bin)?;
-    println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
 }
 
@@ -541,10 +688,7 @@ fn unpack(
     match spec.layout {
         Layout::SingleFile => {
             let contents = decompress_single_file(archive, filename)?;
-            if let Some(parent) = bin.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(bin, contents)?;
+            write_executable_atomically(bin, &contents)?;
         }
         Layout::Flat { dir_rel } => match dir_rel {
             Some(rel) => {
@@ -707,13 +851,7 @@ fn write_jdtls_wrapper(
         launcher.display(),
         config_dir.display()
     );
-    std::fs::write(wrapper_path, script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(wrapper_path, std::fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
+    write_executable_atomically(wrapper_path, script.as_bytes())
 }
 
 async fn install_jdtls() -> Result<PathBuf> {
@@ -726,7 +864,7 @@ async fn install_jdtls() -> Result<PathBuf> {
 
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!(
+    eprintln!(
         "Fetching Eclipse JDT Language Server (using JDK at {})...",
         java.display()
     );
@@ -774,7 +912,6 @@ async fn install_jdtls() -> Result<PathBuf> {
 
     let wrapper = install_dir.join("jdtls");
     write_jdtls_wrapper(&wrapper, &java, &launcher, &config_dir)?;
-    println!("\u{2713} Installed to {}", wrapper.display());
     Ok(wrapper)
 }
 
@@ -920,11 +1057,12 @@ fn zls_spec() -> ReleaseSpec {
 fn install_csharp_ls() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Installing csharp-ls via dotnet tool install...");
+    eprintln!("Installing csharp-ls via dotnet tool install...");
     let status = Command::new("dotnet")
         .args(["tool", "install", "--tool-path"])
         .arg(&install_dir)
         .arg("csharp-ls")
+        .stdout(stdout_to_stderr())
         .status();
     match status {
         Ok(s) if s.success() => {}
@@ -938,17 +1076,17 @@ fn install_csharp_ls() -> Result<PathBuf> {
             bin.display()
         );
     }
-    println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
 }
 
 fn install_ruby_lsp() -> Result<PathBuf> {
     let install_dir = default_install_dir();
     std::fs::create_dir_all(&install_dir)?;
-    println!("Installing ruby-lsp via gem install...");
+    eprintln!("Installing ruby-lsp via gem install...");
     let status = Command::new("gem")
         .args(["install", "ruby-lsp", "--no-document", "--bindir"])
         .arg(&install_dir)
+        .stdout(stdout_to_stderr())
         .status();
     match status {
         Ok(s) if s.success() => {}
@@ -962,7 +1100,6 @@ fn install_ruby_lsp() -> Result<PathBuf> {
             bin.display()
         );
     }
-    println!("\u{2713} Installed to {}", bin.display());
     Ok(bin)
 }
 
@@ -1066,9 +1203,71 @@ pub async fn run_install(language: &str, update: bool) -> Result<()> {
             return Ok(());
         }
     }
+    if !update {
+        if let Some((path, version)) = path_server(language) {
+            println!(
+                "{language} language server found on PATH: {} ({version}), using it.",
+                path.display()
+            );
+            println!("Use 'lsp install <language> --update' to install a managed copy instead.");
+            return Ok(());
+        }
+    }
 
-    install_language(language).await?;
+    let _lock = lock_install(language)?;
+    // Another `lsp install` of the same language may have finished while
+    // we waited for the lock; doing it again would only repeat the work.
+    if !update {
+        if let Some(version) = check_version(language) {
+            println!("{language} language server already installed: {version}");
+            return Ok(());
+        }
+    }
+    let path = install_language(language).await?;
+    println!(
+        "\u{2713} Installed {language} language server to {}",
+        path.display()
+    );
     Ok(())
+}
+
+/// A working server for `language` already on the user's `PATH`, with its
+/// version string.
+///
+/// Consulted only after the managed install directory, so an explicit
+/// `lsp install` always wins. "Working" means it answered its version
+/// probe: rustup puts a `rust-analyzer` proxy on `PATH` even when the
+/// component isn't installed, and that proxy exits non-zero, so mere
+/// presence would pick a binary that can't start. Disabled with
+/// `"usePathServers": false` in the config.
+pub fn path_server(language: &str) -> Option<(PathBuf, String)> {
+    let lang = crate::registry::languages()
+        .iter()
+        .find(|l| l.name == language)?;
+    let path = crate::registry::path_server_candidate(lang.server_bin)?;
+    let version = match handler(language)? {
+        // Both start their LSP loop rather than printing a version.
+        Handler::Release(_) if matches!(language, "kotlin" | "lua") => "installed".to_string(),
+        Handler::Go => run_binary_version(&path, &["version"])?,
+        // `basedpyright-langserver` has no version flag (it exits with
+        // "Connection input stream is not set"); the `basedpyright` CLI
+        // installed alongside it by the same package does.
+        Handler::Npm(_) if language == "python" => {
+            run_binary_version(&path.with_file_name("basedpyright"), &["--version"])?
+        }
+        _ => run_binary_version(&path, &["--version"])?,
+    };
+    Some((path, version))
+}
+
+/// The exact server binary the managed install directory provides for
+/// `language`, or `None` if `language` isn't installed there.
+fn managed_server(language: &str) -> Option<PathBuf> {
+    check_version(language)?;
+    let lang = crate::registry::languages()
+        .iter()
+        .find(|l| l.name == language)?;
+    Some(default_install_dir().join(lang.server_bin))
 }
 
 /// Auto-installs a missing language server, quietly, before a navigation
@@ -1083,21 +1282,49 @@ fn check_deno_version() -> Option<String> {
     run_binary_version(&PathBuf::from("deno"), &["--version"])
 }
 
-pub async fn ensure_installed(language: &str) -> Result<()> {
+/// Makes sure a working server for `language` exists, installing one if
+/// needed, and returns the binary to run.
+///
+/// The returned path is what the daemon should spawn. It is resolved here,
+/// in the CLI, rather than left to the daemon to work out again: the daemon
+/// is a long-lived process with its own (possibly older, possibly minimal)
+/// environment, so its idea of what is on `PATH` can differ from the one
+/// this check just validated. `None` means "nothing to pin": bundled
+/// servers and deno, which the daemon resolves on its own.
+pub async fn ensure_installed(language: &str) -> Result<Option<PathBuf>> {
     if language == "deno" {
         return check_deno_version()
-            .map(|_| ())
+            .map(|_| None)
             .ok_or_else(|| anyhow!("deno is not on PATH. Install it from https://deno.land and retry — lsp-cli does not auto-install deno."));
     }
-    if !is_managed(language) {
-        return Ok(());
+    match handler(language) {
+        None => return Ok(None),
+        Some(Handler::Bundled(_)) => {
+            // Nothing to download, but a missing bundled binary should say
+            // so (that's what "installing" one reports) rather than fail to
+            // spawn with a bare "No such file".
+            if check_version(language).is_none() {
+                install_language(language).await?;
+            }
+            return Ok(None);
+        }
+        Some(_) => {}
     }
-    if check_version(language).is_some() {
-        return Ok(());
+    if let Some(bin) = managed_server(language) {
+        return Ok(Some(bin));
     }
-    println!("[lsp] Auto-installing missing language server for {language}...");
-    install_language(language).await?;
-    Ok(())
+    if let Some((bin, _)) = path_server(language) {
+        return Ok(Some(bin));
+    }
+    let _lock = lock_install(language)?;
+    // Another process may have finished the same install while we waited.
+    if let Some(bin) = managed_server(language) {
+        return Ok(Some(bin));
+    }
+    eprintln!("[lsp] Auto-installing missing language server for {language}...");
+    let path = install_language(language).await?;
+    eprintln!("[lsp] \u{2713} Installed to {}", path.display());
+    Ok(Some(path))
 }
 
 pub fn run_install_list() -> Result<()> {
@@ -1126,12 +1353,18 @@ pub fn run_install_list() -> Result<()> {
             println!("{:<14}{:<12}", lang.name, "not supported");
             continue;
         }
-        let version = check_version(lang.name);
-        let status = if version.is_some() {
+        let mut version = check_version(lang.name);
+        let mut status = if version.is_some() {
             "installed"
         } else {
             "missing"
         };
+        if version.is_none() {
+            if let Some((path, v)) = path_server(lang.name) {
+                status = "on PATH";
+                version = Some(format!("{v} ({})", path.display()));
+            }
+        }
         println!(
             "{:<14}{:<12}{}",
             lang.name,
@@ -1145,6 +1378,63 @@ pub fn run_install_list() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_a_symlink_instead_of_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global-server");
+        std::fs::write(&global, "the user's real server").unwrap();
+        let managed = dir.path().join("servers").join("server");
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&global, &managed).unwrap();
+
+        write_executable_atomically(&managed, b"#!/bin/sh\nexec wrapper\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&global).unwrap(),
+            "the user's real server",
+            "the symlink target must be left alone"
+        );
+        let meta = std::fs::symlink_metadata(&managed).unwrap();
+        assert!(meta.file_type().is_file(), "the link itself is replaced");
+        assert_eq!(
+            std::fs::read_to_string(&managed).unwrap(),
+            "#!/bin/sh\nexec wrapper\n"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+        // No temp file left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(managed.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("server")]);
+    }
+
+    #[test]
+    fn atomic_write_overwrites_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bin");
+        std::fs::write(&dest, "old").unwrap();
+        write_executable_atomically(&dest, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+    }
+
+    #[test]
+    fn is_executable_file_requires_an_exec_bit_and_a_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, "x").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!is_executable_file(&plain));
+        assert!(is_executable_file(&exe));
+        assert!(!is_executable_file(dir.path()));
+        assert!(!is_executable_file(&dir.path().join("missing")));
+    }
 
     #[test]
     fn rust_analyzer_target_covers_every_documented_platform() {

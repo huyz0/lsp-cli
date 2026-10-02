@@ -237,3 +237,101 @@ fn concurrent_server_start_for_the_same_project_creates_only_one_entry() {
         .count();
     assert_eq!(matching, 1, "expected exactly one tracked entry for the project after concurrent starts, got {matching}");
 }
+
+/// Ctrl-C on the command that happened to spawn the daemon (or on an agent
+/// driving it) must not take the daemon and every warm server down with
+/// it. The daemon used to inherit the spawning CLI's process group, so a
+/// SIGINT to that group reached it too.
+#[test]
+fn sigint_to_the_spawning_command_s_process_group_does_not_kill_the_daemon() {
+    use std::os::unix::process::CommandExt;
+    let home = isolated_home("sigint");
+    let mut cli = std::process::Command::new(support::bin_path());
+    cli.args(["server", "list"])
+        .env("LSP_CLI_HOME", home.path())
+        .stdout(std::process::Stdio::null())
+        .process_group(0);
+    let child = cli.spawn().unwrap();
+    let pgid = child.id();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let socket = home.path().join("manager.sock");
+    assert!(socket.exists(), "the command should have started a daemon");
+
+    // Whatever is still in the spawning command's group gets the SIGINT a
+    // terminal Ctrl-C would deliver. `kill` failing (no such group) is the
+    // expected outcome when the daemon isn't in it.
+    // POSIX form via `sh`, so it means "process group" on both Linux and
+    // macOS kill implementations.
+    let _ = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -s INT -- -{pgid}")])
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    assert!(
+        socket.exists(),
+        "the daemon shut down on SIGINT to its parent's group"
+    );
+    let result = lsp_in(&home, &["server", "list", "--output", "json"]);
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+}
+
+/// A request that is slow to answer holds its server's client lock for as
+/// long as it runs. `create` used to wait for that lock while holding the
+/// daemon-wide server map, so one slow hover stalled every other call in
+/// the daemon — including `server list`, which is also the CLI's liveness
+/// probe.
+#[test]
+fn a_slow_request_does_not_stall_unrelated_daemon_calls() {
+    let project = support::FakeServerProject::new(
+        "slow-request",
+        "fn first() {}\nfn second() {}\n",
+        &[("FAKE_LSP_HOVER_DELAY", "8")],
+    );
+    let file = project.file();
+    let warm = project.run(&["outline", &file, "--output", "json"]);
+    assert_eq!(warm.exit_code, 0, "{}", warm.stderr);
+
+    std::thread::scope(|s| {
+        // Hover on line 2 is the slow one.
+        let slow = s.spawn(|| project.run(&["doc", &file, "--scope", "2"]));
+        wait_until_secs(
+            || project.markers.join("hover-started").exists(),
+            "the slow hover to begin",
+            30,
+        );
+        // A second command for the same project reaches `create` while the
+        // hover holds the client lock...
+        let second = s.spawn(|| project.run(&["outline", &file, "--output", "json"]));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // ...and an unrelated daemon call must still answer promptly.
+        let started = std::time::Instant::now();
+        let list = project.run(&["server", "list", "--output", "json"]);
+        let took = started.elapsed();
+        assert_eq!(list.exit_code, 0, "{}", list.stderr);
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "`server list` took {took:?} while a slow request was in flight"
+        );
+        let slow = slow.join().unwrap();
+        assert_eq!(slow.exit_code, 0, "{}", slow.stderr);
+        assert!(
+            slow.stdout.contains("hover: fn second() {}"),
+            "{}",
+            slow.stdout
+        );
+        assert_eq!(second.join().unwrap().exit_code, 0);
+    });
+}
+
+fn wait_until_secs(mut cond: impl FnMut() -> bool, what: &str, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for: {what}");
+}

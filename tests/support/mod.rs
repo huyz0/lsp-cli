@@ -12,7 +12,7 @@ pub struct RunResult {
     pub exit_code: i32,
 }
 
-fn bin_path() -> PathBuf {
+pub fn bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lsp"))
 }
 
@@ -128,7 +128,45 @@ pub fn isolated_home(label: &str) -> IsolatedHome {
     IsolatedHome { dir }
 }
 
+/// Like [`isolated_home`], but with no link to the developer's installed
+/// servers: for tests that need "nothing is installed" to be true.
+pub fn empty_home(label: &str) -> IsolatedHome {
+    let dir = temp_root().join(format!(
+        "lsp-e-{label}-{}-{}",
+        std::process::id(),
+        NEXT_HOME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("failed to create empty LSP_CLI_HOME");
+    IsolatedHome { dir }
+}
+
 static NEXT_HOME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Runs `lsp` against `home` with extra environment variables (e.g. a
+/// `PATH` holding fake tools).
+pub fn lsp_in_env(home: &IsolatedHome, args: &[&str], envs: &[(&str, &str)]) -> RunResult {
+    let output = Command::new(bin_path())
+        .args(args)
+        .env("LSP_CLI_HOME", home.path())
+        .envs(envs.iter().copied())
+        .output()
+        .expect("failed to execute lsp binary");
+    RunResult {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(1),
+    }
+}
+
+/// Writes an executable `#!/bin/sh` script called `name` into `dir`.
+pub fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
 
 pub fn lsp(args: &[&str]) -> RunResult {
     run_with_home(shared_home(), args)
@@ -176,6 +214,14 @@ pub fn has_binary(name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Absolute path of `name` on `PATH`, if any.
+pub fn which(name: &str) -> Option<PathBuf> {
+    let out = Command::new("which").arg(name).output().ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
 fn lsp_cli_servers_dir() -> PathBuf {
@@ -314,4 +360,59 @@ pub fn csharp_fixture(rel: &str) -> PathBuf {
 
 pub fn ruby_fixture(rel: &str) -> PathBuf {
     fixture(&format!("ruby_project/{rel}"))
+}
+
+/// A project served by `tests/support/fake_lsp.py`, installed as the zig
+/// server (`zls`) on a private `PATH`. For tests that need a server whose
+/// behaviour they control. `envs()` gives the environment every `lsp`
+/// invocation against it must use.
+pub struct FakeServerProject {
+    pub home: IsolatedHome,
+    pub dir: PathBuf,
+    pub markers: PathBuf,
+    path: String,
+    extra: Vec<(String, String)>,
+}
+
+impl FakeServerProject {
+    pub fn new(label: &str, source: &str, extra_env: &[(&str, &str)]) -> Self {
+        let home = empty_home(label);
+        let dir = home.path().join("proj");
+        let fakebin = home.path().join("fakebin");
+        let markers = home.path().join("markers");
+        for d in [&dir, &fakebin, &markers] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(dir.join("build.zig"), "").unwrap();
+        std::fs::write(dir.join("main.zig"), source).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_lsp.py");
+        write_script(
+            &fakebin,
+            "zls",
+            &format!("exec python3 \"{}\" \"$@\"", script.display()),
+        );
+        let path = format!("{}:/usr/bin:/bin", fakebin.display());
+        let mut extra: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        extra.push(("FAKE_LSP_MARKER_DIR".into(), markers.display().to_string()));
+        FakeServerProject {
+            home,
+            dir,
+            markers,
+            path,
+            extra,
+        }
+    }
+
+    pub fn file(&self) -> String {
+        self.dir.join("main.zig").display().to_string()
+    }
+
+    pub fn run(&self, args: &[&str]) -> RunResult {
+        let mut envs: Vec<(&str, &str)> = vec![("PATH", self.path.as_str())];
+        envs.extend(self.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        lsp_in_env(&self.home, args, &envs)
+    }
 }

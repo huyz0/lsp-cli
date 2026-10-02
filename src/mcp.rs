@@ -23,13 +23,31 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
         }
         let req: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                // JSON-RPC 2.0: an unparseable message gets a Parse error
+                // with a null id, not silence — a client waiting on that
+                // request would otherwise wait forever.
+                let response = json!({
+                    "jsonrpc": "2.0", "id": Value::Null,
+                    "error": { "code": -32700, "message": format!("Parse error: {e}") }
+                });
+                writeln!(stdout, "{response}")?;
+                stdout.flush()?;
+                continue;
+            }
         };
 
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        // A message without an id is a notification (`notifications/
+        // initialized`, `notifications/cancelled`, ...). JSON-RPC forbids
+        // answering one; this used to reply "Unknown method" with a null
+        // id, which strict clients reject as a protocol violation.
+        let Some(id) = req.get("id").cloned() else {
+            continue;
+        };
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         let response = match method {
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
             "initialize" => json!({
                 "jsonrpc": "2.0", "id": id,
                 "result": {
@@ -83,14 +101,26 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                     match output {
                         Ok(out) => {
                             let is_error = !out.status.success();
-                            let text = if is_error {
-                                String::from_utf8_lossy(&out.stderr).to_string()
+                            let stdout_text = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr_text = String::from_utf8_lossy(&out.stderr).to_string();
+                            let mut content = vec![];
+                            if is_error {
+                                content.push(json!({ "type": "text", "text": stderr_text }));
                             } else {
-                                String::from_utf8_lossy(&out.stdout).to_string()
-                            };
+                                content.push(json!({ "type": "text", "text": stdout_text }));
+                                // Notices a shell user sees on stderr — "N
+                                // more results, use --start-index" above
+                                // all — were dropped entirely here, so an
+                                // agent over MCP never learned a page was
+                                // truncated. Kept as a separate item so the
+                                // first one is still exactly the result.
+                                if !stderr_text.trim().is_empty() {
+                                    content.push(json!({ "type": "text", "text": stderr_text }));
+                                }
+                            }
                             json!({
                                 "jsonrpc": "2.0", "id": id,
-                                "result": { "isError": is_error, "content": [{ "type": "text", "text": text }] }
+                                "result": { "isError": is_error, "content": content }
                             })
                         }
                         Err(e) => {
@@ -99,7 +129,6 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                     }
                 }
             }
-            "" => continue,
             other => {
                 json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Unknown method: {other}") } })
             }

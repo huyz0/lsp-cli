@@ -4,6 +4,13 @@ Per-language server and test-coverage status. See
 [../CONTRIBUTING.md](../CONTRIBUTING.md) for how to install these servers
 locally to run the gated tests referenced below.
 
+A server is resolved from the managed install directory
+(`~/.lsp-cli/servers/`) first, then from `PATH` (any server below except
+jdtls, deno and the bundled ones, when it answers its version probe), and
+only downloaded when neither has one. So the install commands in the
+Server column below are enough on their own: `lsp` picks the result up
+from `PATH`.
+
 | Language | Server | Status |
 |---|---|---|
 | TypeScript | `typescript-language-server` + local `typescript` | ✅ outline/definition/reference/doc/symbol/search/calls/diagnostics/rename, `tests/{outline,definition,reference,doc,symbol,search,calls,diagnostics}.rs`. `hierarchy` is not supported by this server (`textDocument/prepareTypeHierarchy` is unhandled, confirmed live) — it fails with a clean error rather than a bug in this tool. Note: `typescript@7.x` (the new Go-based compiler) restructured its package layout in a way the server doesn't understand yet ("Could not find a valid TypeScript installation"); use `typescript@5.x` in the project's own `node_modules` if hitting that. |

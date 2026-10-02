@@ -15,23 +15,28 @@ The binary is named `lsp`.
 ## Running the full test suite
 
 Most tests are gated on a real language server being installed and skip
-cleanly (with a message) if it isn't. To exercise the full suite, install
-and symlink the servers into `~/.lsp-cli/servers/`:
+cleanly (with a message) if it isn't. A server counts as installed if it
+is in `~/.lsp-cli/servers/` *or* a working copy is on your `PATH`, which is
+the same rule the CLI itself uses, so the simplest setup is to install the
+servers globally:
 
 ```bash
 NPM=npm  # or your Node package manager
-$NPM install -g typescript-language-server basedpyright
-go install golang.org/x/tools/gopls@latest
+$NPM install -g typescript-language-server typescript basedpyright
+go install golang.org/x/tools/gopls@latest   # make sure ~/go/bin is on PATH
 rustup component add rust-analyzer
-
-mkdir -p ~/.lsp-cli/servers && cd ~/.lsp-cli/servers
-ln -sf "$(which typescript-language-server)" typescript-language-server
-ln -sf "$(which basedpyright-langserver)" basedpyright-langserver
-ln -sf "$(which gopls || echo ~/go/bin/gopls)" gopls
-ln -sf "$(rustup which rust-analyzer)" rust-analyzer
 
 cd <this repo>/tests/fixtures/typescript_project && npm install typescript
 ```
+
+Alternatively, let the tool manage its own copies with `lsp install
+typescript`, `lsp install python`, and so on.
+
+Don't symlink a global install *into* `~/.lsp-cli/servers/`. That used to
+be the recommended setup, but an install or update writes into that
+directory, and before installs became symlink-safe that meant writing
+through the link and overwriting the global package's entry point. It is
+no longer needed: servers on `PATH` are found directly.
 
 ### Ruby (`ruby-lsp`)
 

@@ -182,17 +182,16 @@ impl LspClient {
                 Err(_) => return Err(RpcError::Timeout(method.to_string())),
             };
 
-            let msg_id = msg.get("id").and_then(|v| v.as_i64());
-            let server_method = msg.get("method").and_then(|m| m.as_str());
-
-            if let (Some(server_id), Some(server_method)) = (msg_id, server_method) {
+            if is_server_request(&msg) {
                 // Server-initiated request; answer it so the server doesn't stall.
-                self.respond_to_server_request(server_id, server_method)
+                self.respond_to_server_request(&msg)
                     .await
                     .map_err(RpcError::Io)?;
                 continue;
             }
 
+            let msg_id = msg.get("id").and_then(|v| v.as_i64());
+            let server_method = msg.get("method").and_then(|m| m.as_str());
             if let Some(resp_id) = msg_id {
                 if resp_id == id {
                     if let Some(err) = msg.get("error") {
@@ -243,15 +242,12 @@ impl LspClient {
     /// it, so this is just catching up, not waiting on the server.
     pub async fn drain_pending_notifications(&mut self) {
         while let Ok(msg) = self.incoming.try_recv() {
-            let msg_id = msg.get("id").and_then(|v| v.as_i64());
-            let server_method = msg.get("method").and_then(|m| m.as_str());
-            if let (Some(server_id), Some(server_method)) = (msg_id, server_method) {
-                let _ = self
-                    .respond_to_server_request(server_id, server_method)
-                    .await;
+            if is_server_request(&msg) {
+                let _ = self.respond_to_server_request(&msg).await;
                 continue;
             }
-            if msg_id.is_some() {
+            let server_method = msg.get("method").and_then(|m| m.as_str());
+            if msg.get("id").is_some() {
                 continue; // stale response for a request nobody's awaiting anymore
             }
             self.maybe_record_notification(server_method, &msg);
@@ -262,13 +258,8 @@ impl LspClient {
         self.diagnostics.get(uri).cloned().unwrap_or_default()
     }
 
-    async fn respond_to_server_request(&mut self, id: i64, method: &str) -> Result<()> {
-        let result = match method {
-            "workspace/configuration" => json!([]),
-            _ => Value::Null,
-        };
-        let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        self.send(&msg).await
+    async fn respond_to_server_request(&mut self, request: &Value) -> Result<()> {
+        self.send(&server_request_response(request)).await
     }
 
     pub async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
@@ -382,6 +373,39 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// Length of the `\r\n\r\n` sequence terminating an LSP header block.
 const HEADER_TERMINATOR_LEN: usize = 4;
 
+/// Whether `msg` is a request *from* the server (it has both a `method` and
+/// an `id`). JSON-RPC ids may be numbers or strings; only numbers used to
+/// be recognized, so a server using string ids had its requests mistaken
+/// for notifications, never answered, and could stall waiting on them.
+fn is_server_request(msg: &Value) -> bool {
+    msg.get("method").and_then(|m| m.as_str()).is_some()
+        && msg
+            .get("id")
+            .is_some_and(|id| id.is_number() || id.is_string())
+}
+
+/// The minimal reply to a server-initiated request, echoing its id as-is.
+///
+/// `workspace/configuration` must answer with one entry per requested
+/// item, in order (LSP 3.17); `null` means "no configuration, use your
+/// defaults". It used to answer `[]` regardless, which a server indexing
+/// the response by item position reads as malformed.
+fn server_request_response(request: &Value) -> Value {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let result = match request.get("method").and_then(|m| m.as_str()) {
+        Some("workspace/configuration") => {
+            let items = request
+                .get("params")
+                .and_then(|p| p.get("items"))
+                .and_then(|i| i.as_array())
+                .map_or(0, |a| a.len());
+            Value::Array(vec![Value::Null; items])
+        }
+        _ => Value::Null,
+    };
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
 async fn read_loop(stdout: tokio::process::ChildStdout, tx: mpsc::UnboundedSender<Value>) {
     let mut reader = BufReader::new(stdout);
     let mut buf: Vec<u8> = Vec::new();
@@ -455,6 +479,45 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_requests_are_recognized_with_string_or_numeric_ids() {
+        assert!(is_server_request(
+            &json!({"jsonrpc":"2.0","id":"abc","method":"window/workDoneProgress/create","params":{}})
+        ));
+        assert!(is_server_request(
+            &json!({"jsonrpc":"2.0","id":7,"method":"client/registerCapability"})
+        ));
+        // A notification has no id; a response has no method.
+        assert!(!is_server_request(
+            &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{}})
+        ));
+        assert!(!is_server_request(
+            &json!({"jsonrpc":"2.0","id":3,"result":null})
+        ));
+    }
+
+    #[test]
+    fn server_request_response_echoes_a_string_id_verbatim() {
+        let reply = server_request_response(
+            &json!({"jsonrpc":"2.0","id":"req-1","method":"client/registerCapability"}),
+        );
+        assert_eq!(reply, json!({"jsonrpc":"2.0","id":"req-1","result":null}));
+    }
+
+    #[test]
+    fn workspace_configuration_gets_one_null_per_requested_item() {
+        let reply = server_request_response(&json!({
+            "jsonrpc":"2.0","id":4,"method":"workspace/configuration",
+            "params":{"items":[{"section":"a"},{"section":"b"},{"scopeUri":"file:///x"}]}
+        }));
+        assert_eq!(reply["id"], json!(4));
+        assert_eq!(reply["result"], json!([null, null, null]));
+        let reply = server_request_response(
+            &json!({"jsonrpc":"2.0","id":5,"method":"workspace/configuration"}),
+        );
+        assert_eq!(reply["result"], json!([]));
+    }
 
     #[test]
     fn finds_header_terminator() {

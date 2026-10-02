@@ -114,6 +114,12 @@ is decided by the nearest `deno.json`/`deno.jsonc` (→ Deno) vs.
 [docs/language-support.md](docs/language-support.md#typescript-vs-deno)
 for the detection order when a project has both.
 
+A server already on your `PATH` is used as-is (see `usePathServers` under
+[Configuration](#configuration)); one is only downloaded when neither the
+managed install directory nor `PATH` has a working copy. Install output
+always goes to stderr, so a command that auto-installs on first use still
+prints clean JSON on stdout.
+
 Check what's installed with `lsp install --list`. Install or update one
 explicitly with `lsp install <language>` / `lsp install <language> --update`,
 or everything with `lsp install --all`.
@@ -144,7 +150,8 @@ files just fall back to defaults):
 {
   "idleTimeout": 600,
   "managerTimeout": 60,
-  "defaultMaxItems": 20
+  "defaultMaxItems": 20,
+  "usePathServers": true
 }
 ```
 
@@ -156,6 +163,12 @@ Values above are the defaults. All durations are in **seconds**.
   before giving up.
 - `defaultMaxItems` (default 20): page size for `reference` and `search`
   when `--max-items` isn't given.
+- `usePathServers` (default true): when a language's server isn't in
+  `~/.lsp-cli/servers/`, use a working one already on your `PATH` (e.g.
+  `rust-analyzer` from rustup, `gopls` from `go install`) instead of
+  downloading a copy. "Working" means it answered `--version`; rustup's
+  placeholder `rust-analyzer` for an uninstalled component doesn't count.
+  Set it to `false` to always use managed installs.
 
 Set `LSP_CLI_HOME` to relocate the whole state directory (config, socket,
 installed servers) if you want several independent instances.
@@ -164,7 +177,9 @@ installed servers) if you want several independent instances.
 
 `lsp mcp` runs this CLI as an [MCP](https://modelcontextprotocol.io) server
 over stdio, so its commands are callable as MCP tools instead of shell
-invocations.
+invocations. A tool result's first content item is exactly what the
+command prints on stdout; when the command also printed notices on stderr
+(e.g. "N more results, use --start-index"), they follow as a second item.
 
 ## Development
 

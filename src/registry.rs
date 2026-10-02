@@ -226,8 +226,33 @@ pub fn server_path(installed_bin_name: &str, install_dir: &Path) -> PathBuf {
             .and_then(|p| p.parent().map(|d| d.join(installed_bin_name)))
             .unwrap_or_else(|| PathBuf::from(installed_bin_name))
     } else {
-        install_dir.join(installed_bin_name)
+        let managed = install_dir.join(installed_bin_name);
+        if managed.exists() {
+            return managed;
+        }
+        path_server_candidate(installed_bin_name).unwrap_or(managed)
     }
+}
+
+/// Where a server not in the managed install directory would be found on
+/// `PATH`, for the servers that can be run that way.
+///
+/// Matched by the binary's file name (`clangd/bin/clangd` → `clangd`).
+/// Not for deno and the bundled servers, which `server_path` resolves on
+/// its own, nor jdtls: the managed `jdtls` is a wrapper script that pins a
+/// JDK and the launcher jar, and a distro's `jdtls` takes different
+/// arguments. Unvalidated — `install::path_server` checks that the binary
+/// actually runs before anything relies on it.
+pub fn path_server_candidate(installed_bin_name: &str) -> Option<PathBuf> {
+    if installed_bin_name == "deno"
+        || installed_bin_name == "jdtls"
+        || is_bundled_server(installed_bin_name)
+        || !crate::config::load_config().use_path_servers
+    {
+        return None;
+    }
+    let name = Path::new(installed_bin_name).file_name()?.to_str()?;
+    crate::install::find_on_path(name)
 }
 
 pub fn detect_language(file_path: &Path) -> Option<LanguageConfig> {

@@ -8,6 +8,10 @@ pub struct LspCliConfig {
     pub manager_timeout: u64,
     #[serde(default = "default_max_items")]
     pub default_max_items: usize,
+    /// Use a working language server already on `PATH` when none is in the
+    /// managed install directory, instead of downloading one.
+    #[serde(default = "default_use_path_servers")]
+    pub use_path_servers: bool,
 }
 
 fn default_idle_timeout() -> u64 {
@@ -25,6 +29,9 @@ fn default_manager_timeout() -> u64 {
 fn default_max_items() -> usize {
     20
 }
+fn default_use_path_servers() -> bool {
+    true
+}
 
 impl Default for LspCliConfig {
     fn default() -> Self {
@@ -32,6 +39,7 @@ impl Default for LspCliConfig {
             idle_timeout: default_idle_timeout(),
             manager_timeout: default_manager_timeout(),
             default_max_items: default_max_items(),
+            use_path_servers: default_use_path_servers(),
         }
     }
 }
@@ -65,6 +73,9 @@ fn load_config_from(path: &std::path::Path) -> LspCliConfig {
             if let Some(n) = v.get("defaultMaxItems").and_then(|x| x.as_u64()) {
                 cfg.default_max_items = n as usize;
             }
+            if let Some(b) = v.get("usePathServers").and_then(|x| x.as_bool()) {
+                cfg.use_path_servers = b;
+            }
             cfg
         })
         .unwrap_or_default()
@@ -93,6 +104,18 @@ mod tests {
     // --- load_config_from: the actual file-reading function, previously
     // untested end-to-end (the two tests above only exercised `Default` and
     // generic serde_json round-tripping, not this module's own logic).
+
+    #[test]
+    fn use_path_servers_defaults_on_and_can_be_turned_off() {
+        assert!(LspCliConfig::default().use_path_servers);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"usePathServers": false}"#).unwrap();
+        assert!(!load_config_from(&path).use_path_servers);
+        // A wrong type is ignored, not a reason to flip the default.
+        std::fs::write(&path, r#"{"usePathServers": "no"}"#).unwrap();
+        assert!(load_config_from(&path).use_path_servers);
+    }
 
     #[test]
     fn missing_file_falls_back_to_defaults() {

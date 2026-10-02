@@ -119,15 +119,18 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
             })
             .unwrap_or(false);
 
-    if !already_warm {
-        crate::install::ensure_installed(&ctx.language).await?;
-    }
+    let server_bin = if already_warm {
+        None
+    } else {
+        crate::install::ensure_installed(&ctx.language).await?
+    };
 
     client.ensure_running().await?;
     client
         .create_server(
             &ctx.file_path.to_string_lossy(),
             Some(&ctx.project_root.to_string_lossy()),
+            server_bin.as_deref(),
         )
         .await?;
     // The daemon (`Manager::proxy_notify`) turns this into a `didChange`
@@ -1077,7 +1080,7 @@ async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInf
     // matched the running server and every Deno search silently fell
     // through to the BM25 index.
     let info = client
-        .create_server(&entry.path().to_string_lossy(), Some(project_root))
+        .create_server(&entry.path().to_string_lossy(), Some(project_root), None)
         .await?;
     let result = client
         .proxy_request(

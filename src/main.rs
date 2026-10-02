@@ -529,7 +529,15 @@ fn inject_json_args(mut argv: Vec<String>) -> Vec<String> {
     // pairs — and clap takes the last value for a scalar flag, so an
     // explicit `"output": "markdown"` was silently overridden and the
     // `output` property the schema advertises was unreachable.
-    if !obj.contains_key("output") {
+    //
+    // Not for the commands that have no `--output` at all: appending it to
+    // `install` made every MCP `install` call fail with clap's "unexpected
+    // argument '--output'".
+    let has_output_flag = !matches!(
+        argv.get(1).map(String::as_str),
+        Some("install" | "i" | "schema")
+    );
+    if has_output_flag && !obj.contains_key("output") {
         argv.push("--output".to_string());
         argv.push("json".to_string());
     }
@@ -829,7 +837,7 @@ async fn run_server(sub: &str, path: Option<&str>, all: bool, fmt: &OutputFormat
             };
             // No root override: `server start` is given a path (often a
             // bare directory) and wants the daemon's own detection.
-            let info = client.create_server(&target, None).await?;
+            let info = client.create_server(&target, None, None).await?;
             // Honour --output like `server list` does. These three arms
             // printed prose regardless of the format they were handed, so
             // `lsp server start` emitted a sentence even though JSON is

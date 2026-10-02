@@ -234,6 +234,28 @@ a live warm server for that project+language, since otherwise this meant
 spawning a `<bin> --version` subprocess on *every single navigation
 command* even against an already-warm server.
 
+Three rules keep auto-install safe to run in the middle of a command whose
+stdout an agent is parsing:
+
+- **Resolution order**: managed install directory, then a working server
+  on `PATH` (`install::path_server`, validated by its version probe, with
+  a 10s cap so a binary that waits for input can't hang the command),
+  then download. Opt out with `usePathServers: false`. The CLI resolves
+  the exact binary and passes it to the daemon in `/create`
+  (`server_path`): the daemon is long-lived and keeps the environment of
+  whatever started it, so letting it search its own `PATH` again could
+  pick a different binary, or none. `registry::server_path` is only the
+  fallback for callers that don't resolve one (`server start`).
+- **Stdout stays clean**: all progress, and the package managers' own
+  stdout, go to stderr. The CLI's stdout is the result document; under
+  `lsp mcp` it is the tool result.
+- **Writes are atomic and never follow symlinks**
+  (`write_executable_atomically`: temp file plus rename), and one
+  language's installs are serialized across processes by a lock file
+  (`install-<lang>.lock` in the state directory). Without the lock,
+  several first-use commands raced `npm install` into the same directory.
+  Network requests have connect and read timeouts.
+
 **Known accepted risk: no checksum/signature verification on downloaded
 binaries.** `rust`/`kotlin` (GitHub Releases) and `java` (Eclipse's
 `jdt-language-server-latest.tar.gz` (an unversioned "latest" snapshot, not
