@@ -268,6 +268,31 @@ pub struct Detected {
     pub root: PathBuf,
 }
 
+/// `detect_project_root`, also accepting a bare directory, for which it
+/// probes common entry files. What `server start <dir>` needs.
+///
+/// A directory is matched by the root markers it contains, in registry
+/// order (so `deno.json` wins over `package.json`, as for files). Probing
+/// a few hard-coded entry files used to be the only way, so any language
+/// without one of them in the list (Zig, Ruby, C++, ...) could not be
+/// started by directory at all.
+pub fn detect_for_path(path: &Path) -> Option<Detected> {
+    if path.is_dir() {
+        let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(lang) = languages()
+            .iter()
+            .find(|l| l.root_markers.iter().any(|m| path.join(m).exists()))
+        {
+            return Some(Detected { lang: *lang, root });
+        }
+    }
+    detect_project_root(path).or_else(|| {
+        ["index.ts", "main.go", "main.py", "main.rs", "Main.java"]
+            .iter()
+            .find_map(|probe| detect_project_root(&path.join(probe)))
+    })
+}
+
 /// Walk up from file_path looking for a root marker matching a known language.
 /// Falls back to the file's own directory for languages with no root markers
 /// (html, css, json, csharp, bash).
@@ -348,6 +373,25 @@ pub use crate::paths::install_dir as default_install_dir;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_is_detected_by_the_root_markers_it_contains() {
+        let detect = |markers: &[&str]| {
+            let dir = tempfile::tempdir().unwrap();
+            for m in markers {
+                std::fs::write(dir.path().join(m), "").unwrap();
+            }
+            detect_for_path(dir.path())
+                .map(|d| (d.lang.name, d.root == dir.path().canonicalize().unwrap()))
+        };
+        assert_eq!(detect(&["build.zig"]), Some(("zig", true)));
+        assert_eq!(detect(&["Gemfile"]), Some(("ruby", true)));
+        assert_eq!(detect(&["go.mod"]), Some(("go", true)));
+        // Same precedence as for a file: Deno before Node.
+        assert_eq!(detect(&["package.json", "deno.json"]), Some(("deno", true)));
+        assert_eq!(detect(&["package.json"]), Some(("typescript", true)));
+        assert_eq!(detect(&[]), None);
+    }
 
     #[test]
     fn detects_typescript_by_extension() {

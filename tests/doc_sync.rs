@@ -174,3 +174,43 @@ fn diagnostics_after_an_unrelated_change_wait_at_most_once() {
         );
     }
 }
+
+/// A `.tsx` file used to be opened with languageId `typescript`, so the
+/// server parsed its JSX as plain TypeScript and reported syntax errors in
+/// valid code.
+#[test]
+fn a_tsx_file_is_parsed_as_tsx() {
+    if !has_ts_server() {
+        eprintln!("skipping: typescript-language-server not installed");
+        return;
+    }
+    let project = ts_project_copy();
+    let tsconfig = project.path().join("tsconfig.json");
+    let text = std::fs::read_to_string(&tsconfig).unwrap();
+    std::fs::write(
+        &tsconfig,
+        text.replace(
+            "\"strict\": true,",
+            "\"strict\": true,\n    \"jsx\": \"preserve\",",
+        ),
+    )
+    .unwrap();
+    let view = project.path().join("src/view.tsx");
+    std::fs::write(
+        &view,
+        "declare global { namespace JSX { interface IntrinsicElements { [name: string]: any } } }\n\
+         export function View(props: { name: string }) {\n  return <div className=\"x\">{props.name}</div>;\n}\n",
+    )
+    .unwrap();
+    let data = lsp_json(&["diagnostics", view.to_str().unwrap()]);
+    let errors: Vec<&serde_json::Value> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "valid TSX reported as broken: {errors:?}"
+    );
+}

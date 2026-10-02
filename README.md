@@ -71,6 +71,10 @@ lsp search "User" --kinds class               # find a symbol workspace-wide
 lsp rename src/models.ts --scope User.greet --new-name sayHello --apply  # rename across every file
 ```
 
+JSON positions use 1-based `line` numbers (as `--scope` does) and 0-based
+`character` offsets in UTF-16 code units (as LSP does). A failure exits 1
+with the reason on stderr.
+
 Every navigation command takes `--output json` (the default) or `--output
 markdown`, and `--dry-run` to print the LSP request it would send without
 sending it. `install` and `schema` take neither; `locate` and `server`

@@ -14,7 +14,7 @@
 //! have died (see `Manager::create`'s liveness check).
 
 use crate::lsp_client::LspClient;
-use crate::registry::{default_install_dir, detect_project_root, server_path};
+use crate::registry::{default_install_dir, server_path};
 use crate::watcher::WatcherManager;
 use anyhow::Result;
 use axum::extract::State;
@@ -75,6 +75,9 @@ pub struct CreateRequest {
     /// the daemon falls back to `registry::server_path`.
     #[serde(default)]
     pub server_path: Option<String>,
+    /// The language the CLI resolved for `path`. See `Manager::create`.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -195,19 +198,35 @@ impl Manager {
         path: &str,
         project_root_override: Option<&str>,
         server_path_override: Option<&str>,
+        language_override: Option<&str>,
     ) -> Result<ManagedServerInfo> {
         let file_path = std::path::Path::new(path);
-        let detected = detect_project_root(file_path)
-            .or_else(|| {
-                // Allow `path` to be a bare directory: probe common entry files.
-                for probe in ["index.ts", "main.go", "main.py", "main.rs", "Main.java"] {
-                    if let Some(d) = detect_project_root(&file_path.join(probe)) {
-                        return Some(d);
-                    }
-                }
-                None
-            })
-            .ok_or_else(|| anyhow::anyhow!("Cannot detect language for path: {path}"))?;
+        // The CLI has usually resolved the language already (it needs it
+        // to install a server), and its resolution allows a file with no
+        // root marker when `--project` names the root. Re-detecting here
+        // from markers alone failed exactly that case with "Cannot detect
+        // language for path", making `--project` unusable for it.
+        let language_override = language_override.and_then(|name| {
+            crate::registry::languages()
+                .iter()
+                .find(|l| l.name == name)
+                .copied()
+        });
+        let detected = match (
+            crate::registry::detect_for_path(file_path),
+            language_override,
+        ) {
+            (Some(d), None) => d,
+            (Some(d), Some(lang)) if d.lang.name == lang.name => d,
+            // Marker detection found nothing (or disagrees): the caller's
+            // language stands, and the root is the caller's override when
+            // given (below), otherwise the file's directory.
+            (_, Some(lang)) => crate::registry::Detected {
+                lang,
+                root: file_path.parent().unwrap_or(file_path).to_path_buf(),
+            },
+            (None, None) => anyhow::bail!("Cannot detect language for path: {path}"),
+        };
 
         // The caller's root wins when it supplied one, so the key this
         // server is registered under is the same string later `/request`
@@ -758,7 +777,11 @@ async fn wait_until_indexed(client: &mut LspClient, language: &str, file_path: &
     };
     let uri = lsp::uri::from_path(file_path);
     if client
-        .sync_document(&uri, crate::project::language_id(language), &text)
+        .sync_document(
+            &uri,
+            crate::project::language_id(language, file_path),
+            &text,
+        )
         .await
         .is_err()
     {
@@ -923,6 +946,7 @@ async fn create_handler(
         &req.path,
         req.project_root.as_deref(),
         req.server_path.as_deref(),
+        req.language.as_deref(),
     )
     .await
     .map(Json)

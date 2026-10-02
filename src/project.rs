@@ -67,9 +67,76 @@ pub fn resolve_project(file_path: &str, project_override: Option<&str>) -> Resul
 }
 
 /// LSP `languageId` for a `textDocument/didOpen` notification.
-pub fn language_id(language: &str) -> &str {
-    match language {
-        "deno" => "typescript",
-        other => other,
+///
+/// Keyed on the file's extension, not just the registry language: the
+/// identifiers the spec lists distinguish `typescriptreact` from
+/// `typescript`, `javascript` from both, `c` from `cpp`, and call shell
+/// scripts `shellscript`. Sending the registry name ("typescript") for a
+/// `.tsx` or `.js` file told typescript-language-server to parse JSX as
+/// plain TypeScript.
+pub fn language_id(language: &str, path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match (language, ext.as_str()) {
+        ("typescript" | "deno", "tsx") => "typescriptreact",
+        ("typescript" | "deno", "jsx") => "javascriptreact",
+        ("typescript" | "deno", "js" | "mjs" | "cjs") => "javascript",
+        ("typescript" | "deno", _) => "typescript",
+        ("cpp", "c") => "c",
+        ("cpp", _) => "cpp",
+        ("bash", _) => "shellscript",
+        ("css", "scss") => "scss",
+        ("css", "less") => "less",
+        ("css", _) => "css",
+        ("json", "jsonc") => "jsonc",
+        ("json", _) => "json",
+        ("python", _) => "python",
+        ("go", _) => "go",
+        ("rust", _) => "rust",
+        ("java", _) => "java",
+        ("kotlin", _) => "kotlin",
+        ("lua", _) => "lua",
+        ("zig", _) => "zig",
+        ("ruby", _) => "ruby",
+        ("csharp", _) => "csharp",
+        ("html", _) => "html",
+        _ => "plaintext",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_ids_follow_the_extension() {
+        let id = |lang, file| language_id(lang, Path::new(file));
+        assert_eq!(id("typescript", "a/b.ts"), "typescript");
+        assert_eq!(id("typescript", "a/b.mts"), "typescript");
+        assert_eq!(id("typescript", "a/B.TSX"), "typescriptreact");
+        assert_eq!(id("typescript", "a/b.jsx"), "javascriptreact");
+        assert_eq!(id("typescript", "a/b.js"), "javascript");
+        assert_eq!(id("typescript", "a/b.cjs"), "javascript");
+        assert_eq!(id("deno", "mod.tsx"), "typescriptreact");
+        assert_eq!(id("deno", "mod.ts"), "typescript");
+        assert_eq!(id("cpp", "x.c"), "c");
+        assert_eq!(id("cpp", "x.h"), "cpp");
+        assert_eq!(id("cpp", "x.cc"), "cpp");
+        assert_eq!(id("bash", "run.sh"), "shellscript");
+        assert_eq!(id("css", "s.scss"), "scss");
+        assert_eq!(id("json", "tsconfig.jsonc"), "jsonc");
+        assert_eq!(id("csharp", "A.cs"), "csharp");
+    }
+
+    #[test]
+    fn every_registry_language_has_an_explicit_id() {
+        for lang in crate::registry::languages() {
+            let ext = lang.extensions[0].trim_start_matches('.');
+            let id = language_id(lang.name, Path::new(&format!("f.{ext}")));
+            assert_ne!(id, "plaintext", "{} has no languageId", lang.name);
+        }
     }
 }

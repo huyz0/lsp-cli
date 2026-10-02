@@ -81,3 +81,47 @@ fn exits_1_when_file_does_not_exist() {
     let result = lsp(&["locate", "/nonexistent/file.ts", "--scope", "1"]);
     assert_eq!(result.exit_code, 1);
 }
+
+/// `--scope 500,600` on a short file panicked (exit 101, "range start index
+/// out of range"); a line past the end silently became the last line.
+#[test]
+fn an_out_of_range_scope_is_a_clean_error() {
+    let file = support::fixture("go_project/go.mod");
+    for scope in ["500,600", "500", "0"] {
+        let result = support::lsp(&["locate", file.to_str().unwrap(), "--scope", scope]);
+        assert_eq!(result.exit_code, 1, "--scope {scope}: {}", result.stderr);
+        assert!(result.stderr.contains("out of range"), "{}", result.stderr);
+    }
+}
+
+/// Without `--scope` or `--find` there is no position. `definition` used to
+/// query line 1 anyway and exit 0 with an empty answer.
+#[test]
+fn navigation_without_a_position_is_an_error() {
+    let file = support::ts_fixture("src/service.ts");
+    let result = support::lsp(&["definition", file.to_str().unwrap()]);
+    assert_eq!(result.exit_code, 1, "{}", result.stdout);
+    assert!(result.stderr.contains("--scope"), "{}", result.stderr);
+}
+
+/// `UserOptions.greet` doesn't exist; it used to resolve to `User.greet`
+/// further down the file.
+#[test]
+fn a_nested_scope_never_resolves_into_a_different_parent() {
+    let file = support::ts_fixture("src/models.ts");
+    let result = support::lsp(&[
+        "locate",
+        file.to_str().unwrap(),
+        "--scope",
+        "UserOptions.greet",
+    ]);
+    assert_eq!(result.exit_code, 1, "{}", result.stdout);
+    assert!(
+        result.stderr.contains("Nested symbol not found"),
+        "{}",
+        result.stderr
+    );
+
+    let data = support::lsp_json(&["locate", file.to_str().unwrap(), "--scope", "User.greet"]);
+    assert_eq!(data["line"], 25, "{data}");
+}

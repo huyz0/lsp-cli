@@ -15,6 +15,13 @@ which reach it from the test via CLI -> daemon -> server inheritance:
                          hover begins, so a test can wait for it instead of
                          guessing with sleeps
   FAKE_LSP_LOG           file to append every received method name to
+  FAKE_LSP_FLAT_SYMBOLS  if set, answer documentSymbol with the flat
+                         SymbolInformation[] shape instead of DocumentSymbol[]
+
+Call hierarchy: prepareCallHierarchy returns the symbol under the cursor
+with an opaque `data` token, and incomingCalls answers only if that token
+comes back intact (as a real server that keys state on `data` would);
+otherwise it returns an error.
 """
 
 import json
@@ -111,7 +118,32 @@ while True:
             "serverInfo": {"name": "fake-lsp"},
         }
     elif method == "textDocument/documentSymbol":
-        result = symbols(docs.get(params["textDocument"]["uri"], ""))
+        uri = params["textDocument"]["uri"]
+        result = symbols(docs.get(uri, ""))
+        if os.environ.get("FAKE_LSP_FLAT_SYMBOLS"):
+            result = [
+                {"name": s["name"], "kind": s["kind"],
+                 "location": {"uri": uri, "range": s["range"]}}
+                for s in result
+            ]
+    elif method == "textDocument/prepareCallHierarchy":
+        uri = params["textDocument"]["uri"]
+        line = params["position"]["line"]
+        result = [
+            dict(s, uri=uri, data={"token": "opaque-%d" % line})
+            for s in symbols(docs.get(uri, ""))
+            if s["range"]["start"]["line"] == line
+        ]
+    elif method == "callHierarchy/incomingCalls":
+        item = params["item"]
+        if item.get("data", {}).get("token", "").startswith("opaque-"):
+            caller = dict(item, name="caller_of_" + item["name"])
+            caller.pop("data", None)
+            result = [{"from": caller, "fromRanges": [item["selectionRange"]]}]
+        else:
+            send({"jsonrpc": "2.0", "id": msg["id"],
+                  "error": {"code": -32602, "message": "item data missing"}})
+            continue
     elif method == "textDocument/hover":
         line = params["position"]["line"]
         if line > 0:

@@ -210,11 +210,13 @@ impl ManagerClient {
         path: &str,
         project_root: Option<&str>,
         server_path: Option<&std::path::Path>,
+        language: Option<&str>,
     ) -> Result<ManagedServerInfo> {
         let body = serde_json::json!({
             "path": path,
             "project_root": project_root,
             "server_path": server_path.map(|p| p.to_string_lossy()),
+            "language": language,
         })
         .to_string();
         let (status, resp) = raw_request("POST", "/create", Some(body)).await?;

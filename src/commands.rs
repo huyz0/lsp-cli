@@ -46,10 +46,9 @@ use crate::locate::resolve_locate;
 use crate::manager_client::ManagerClient;
 use crate::project::{language_id, resolve_project, ProjectContext};
 use crate::protocol::{
-    symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall,
-    DocumentChangeOp, DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location,
-    LocationOrMany, SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit,
-    ALL_SYMBOL_KIND_IDS,
+    symbol_kind_name, CallHierarchyIncomingCall, CallHierarchyOutgoingCall, DocumentChangeOp,
+    DocumentDiagnosticReport, DocumentSymbol, HoverResult, Location, LocationOrMany,
+    SymbolInformation, TextEdit, TypeHierarchyItem, WorkspaceEdit, ALL_SYMBOL_KIND_IDS,
 };
 use crate::registry;
 use crate::{CallDirection, DefinitionMode, HierarchyDirection, ReferenceMode};
@@ -127,6 +126,7 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
             &ctx.file_path.to_string_lossy(),
             Some(&ctx.project_root.to_string_lossy()),
             server_bin.as_deref(),
+            Some(&ctx.language),
         )
         .await?;
     // The daemon (`Manager::proxy_notify`) turns this into a `didChange`
@@ -143,7 +143,7 @@ async fn ensure_daemon_session(ctx: &ProjectContext, content: &str) -> Result<Ma
             json!({
                 "textDocument": {
                     "uri": ctx.uri,
-                    "languageId": language_id(&ctx.language),
+                    "languageId": language_id(&ctx.language, &ctx.file_path),
                     "version": 1,
                     "text": content,
                 }
@@ -228,6 +228,46 @@ async fn proxy_request_with_retry(
     }
 }
 
+/// Decodes a list-shaped LSP result. `null` is a legitimate "nothing";
+/// a reply of any other shape is an error.
+///
+/// Every decode here used to be `.unwrap_or_default()`, which turned a
+/// response this tool failed to understand into an empty list and exit
+/// code 0 — indistinguishable from "there are no references".
+fn decode_list<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> Result<Vec<T>> {
+    if v.is_null() {
+        return Ok(vec![]);
+    }
+    serde_json::from_value(v)
+        .map_err(|e| anyhow!("unexpected {what} response from the server: {e}"))
+}
+
+/// `documentSymbol` may answer in either of two shapes: hierarchical
+/// `DocumentSymbol[]`, or flat `SymbolInformation[]` (which some servers
+/// send regardless of the client's stated preference). The flat form used
+/// to fail to decode and silently produce an empty outline.
+fn decode_document_symbols(v: Value) -> Result<Vec<DocumentSymbol>> {
+    let is_flat = v
+        .as_array()
+        .and_then(|a| a.first())
+        .is_some_and(|first| first.get("location").is_some());
+    if !is_flat {
+        return decode_list(v, "documentSymbol");
+    }
+    let flat: Vec<SymbolInformation> = decode_list(v, "documentSymbol")?;
+    Ok(flat
+        .into_iter()
+        .map(|s| DocumentSymbol {
+            name: s.name,
+            detail: s.container_name,
+            kind: s.kind,
+            range: s.location.range,
+            selection_range: s.location.range,
+            children: None,
+        })
+        .collect())
+}
+
 fn is_empty_locations_result(v: &Value) -> bool {
     v.is_null() || v.as_array().is_some_and(|a| a.is_empty())
 }
@@ -266,7 +306,7 @@ pub async fn run_outline(
         )
         .await?;
 
-    let symbols: Vec<DocumentSymbol> = serde_json::from_value(result).unwrap_or_default();
+    let symbols = decode_document_symbols(result)?;
     let filtered = if all {
         symbols
     } else {
@@ -317,7 +357,12 @@ pub async fn run_diagnostics(
             )
         })?;
 
-    let report: DocumentDiagnosticReport = serde_json::from_value(result).unwrap_or_default();
+    let report: DocumentDiagnosticReport = if result.is_null() {
+        DocumentDiagnosticReport::default()
+    } else {
+        serde_json::from_value(result)
+            .map_err(|e| anyhow!("unexpected diagnostics response from the server: {e}"))?
+    };
     println!("{}", fmt.diagnostics(&report.items));
     Ok(())
 }
@@ -364,13 +409,15 @@ pub async fn run_calls(
             json!({ "textDocument": { "uri": ctx.uri }, "position": { "line": pos.line, "character": pos.character } }),
         )
         .await?;
-    let items: Vec<CallHierarchyItem> = serde_json::from_value(prepared).unwrap_or_default();
-    let Some(root) = items.into_iter().next() else {
+    // The prepared item goes back to the server exactly as received. It
+    // can carry a `data` field (and `tags`) that the server needs to
+    // resolve the follow-up request; it used to be decoded into a struct
+    // without them and re-encoded, which dropped both.
+    let items: Vec<Value> = decode_list(prepared, "prepareCallHierarchy")?;
+    let Some(root_json) = items.into_iter().next() else {
         println!("{}", fmt.calls(direction.as_str(), &[]));
         return Ok(());
     };
-
-    let root_json = serde_json::to_value(&root)?;
 
     let items = if direction == CallDirection::Incoming {
         let result = client
@@ -381,8 +428,7 @@ pub async fn run_calls(
                 json!({ "item": root_json }),
             )
             .await?;
-        let calls: Vec<CallHierarchyIncomingCall> =
-            serde_json::from_value(result).unwrap_or_default();
+        let calls: Vec<CallHierarchyIncomingCall> = decode_list(result, "incomingCalls")?;
         calls.into_iter().map(|c| c.from).collect::<Vec<_>>()
     } else {
         let result = client
@@ -393,8 +439,7 @@ pub async fn run_calls(
                 json!({ "item": root_json }),
             )
             .await?;
-        let calls: Vec<CallHierarchyOutgoingCall> =
-            serde_json::from_value(result).unwrap_or_default();
+        let calls: Vec<CallHierarchyOutgoingCall> = decode_list(result, "outgoingCalls")?;
         calls.into_iter().map(|c| c.to).collect::<Vec<_>>()
     };
 
@@ -444,12 +489,12 @@ pub async fn run_hierarchy(
             json!({ "textDocument": { "uri": ctx.uri }, "position": { "line": pos.line, "character": pos.character } }),
         )
         .await?;
-    let items: Vec<TypeHierarchyItem> = serde_json::from_value(prepared).unwrap_or_default();
-    let Some(root) = items.into_iter().next() else {
+    // Sent back verbatim; see the same step in `run_calls`.
+    let items: Vec<Value> = decode_list(prepared, "prepareTypeHierarchy")?;
+    let Some(root_json) = items.into_iter().next() else {
         println!("{}", fmt.hierarchy(direction.as_str(), &[]));
         return Ok(());
     };
-    let root_json = serde_json::to_value(&root)?;
 
     let method = if direction == HierarchyDirection::Supertypes {
         "typeHierarchy/supertypes"
@@ -464,7 +509,7 @@ pub async fn run_hierarchy(
             json!({ "item": root_json }),
         )
         .await?;
-    let items: Vec<TypeHierarchyItem> = serde_json::from_value(result).unwrap_or_default();
+    let items: Vec<TypeHierarchyItem> = decode_list(result, method)?;
 
     println!("{}", fmt.hierarchy(direction.as_str(), &items));
     Ok(())
@@ -488,8 +533,18 @@ fn collect_edits(edit: &WorkspaceEdit) -> (Vec<(String, Vec<TextEdit>)>, usize) 
         let mut skipped = 0;
         for op in doc_changes {
             match op {
+                // A file may appear more than once; its edits are one set,
+                // all against the original text, and must be validated and
+                // applied together.
                 DocumentChangeOp::Edit(te) => {
-                    files.push((te.text_document.uri.clone(), te.edits.clone()))
+                    match files
+                        .iter_mut()
+                        .find(|(uri, _): &&mut (String, Vec<TextEdit>)| {
+                            *uri == te.text_document.uri
+                        }) {
+                        Some((_, edits)) => edits.extend(te.edits.iter().cloned()),
+                        None => files.push((te.text_document.uri.clone(), te.edits.clone())),
+                    }
                 }
                 DocumentChangeOp::FileOp(_) => skipped += 1,
             }
@@ -508,57 +563,92 @@ fn collect_edits(edit: &WorkspaceEdit) -> (Vec<(String, Vec<TextEdit>)>, usize) 
     (vec![], 0)
 }
 
-/// Applies `edits` to `content` and returns the new text. Edits are applied
-/// in reverse position order (bottom-to-top, right-to-left within a line)
-/// so that applying one edit never invalidates the line/character offsets
-/// of edits still pending — the offsets in a `WorkspaceEdit` are all
-/// relative to the *original* unmodified document, per the LSP spec.
+/// Applies `edits` to `content` and returns the new text, or an error if
+/// the edits can't be applied as a whole.
 ///
-/// Character offsets are UTF-16 code units, per the spec and per what
-/// `lsp_client.rs::initialize` negotiates (it declares no
-/// `positionEncodings`, so UTF-16 is mandatory). This used to index a
-/// `Vec<char>` with those offsets, which is only correct while every
-/// character on the line is in the Basic Multilingual Plane: a single
-/// astral character (emoji, `𝕏`) earlier on the line shifts every
-/// subsequent offset by one and the edit lands in the wrong place. Since
-/// this is the one code path in the tool that writes to disk, that
-/// mis-slice silently corrupted the file rather than merely returning a
-/// wrong answer.
-fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
-    let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
-    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.range
-            .start
-            .line
-            .cmp(&a.range.start.line)
-            .then(b.range.start.character.cmp(&a.range.start.character))
-    });
-
-    for edit in sorted {
-        let start_line = edit.range.start.line as usize;
-        let end_line = edit.range.end.line as usize;
-        if start_line >= lines.len() {
-            continue; // stale edit against content that's shifted since the server computed it
+/// All offsets in a `WorkspaceEdit` refer to the *original* document (LSP
+/// spec), so every edit is resolved to a byte span of `content` first and
+/// the result is assembled in one pass. Character offsets are UTF-16 code
+/// units (`initialize` negotiates no other `positionEncodings`): a
+/// `Vec<char>` index used to put an edit in the wrong place after an astral
+/// character, and this is the one code path that writes to disk.
+///
+/// Refused, rather than skipped, because a partially applied rename is a
+/// silently broken codebase:
+/// - a line past the end of the document (the edit was computed against
+///   different content);
+/// - a range whose end precedes its start;
+/// - overlapping ranges.
+///
+/// A character past the end of its line is clamped to the line's end, which
+/// is what the spec says it means (the line ending itself is never part of
+/// the line). Several inserts at the same position are applied in the order
+/// given, as the spec requires; the previous bottom-to-top sort reversed
+/// them.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
+    // Byte offset of the start of each line. `split('\n')` yields the
+    // empty "line" after a trailing newline, which is a valid position.
+    let mut line_starts = vec![0usize];
+    line_starts.extend(content.match_indices('\n').map(|(i, _)| i + 1));
+    let line_text = |line: usize| -> &str {
+        let start = line_starts[line];
+        let end = line_starts
+            .get(line + 1)
+            .map(|next| next - 1)
+            .unwrap_or(content.len());
+        content[start..end]
+            .strip_suffix('\r')
+            .unwrap_or(&content[start..end])
+    };
+    let offset = |pos: &crate::protocol::Position| -> Result<usize> {
+        let line = pos.line as usize;
+        // The start of the line after the last one is the end of the
+        // document, which is how servers spell "to the end" in a
+        // whole-file edit of a file without a trailing newline.
+        if line == line_starts.len() && pos.character == 0 {
+            return Ok(content.len());
         }
-        if start_line == end_line {
-            let line = &lines[start_line];
-            let start_b = utf16_col_to_byte(line, edit.range.start.character);
-            let end_b = utf16_col_to_byte(line, edit.range.end.character).max(start_b);
-            lines[start_line] = format!("{}{}{}", &line[..start_b], edit.new_text, &line[end_b..]);
-        } else if end_line < lines.len() {
-            let start_b = utf16_col_to_byte(&lines[start_line], edit.range.start.character);
-            let end_b = utf16_col_to_byte(&lines[end_line], edit.range.end.character);
-            let merged = format!(
-                "{}{}{}",
-                &lines[start_line][..start_b],
-                edit.new_text,
-                &lines[end_line][end_b..]
+        if line >= line_starts.len() {
+            let real_lines = line_starts.len() - usize::from(content.ends_with('\n'));
+            bail!(
+                "edit refers to line {} but the file has {real_lines} line(s); it was computed against different content",
+                line + 1
             );
-            lines.splice(start_line..=end_line, [merged]);
+        }
+        Ok(line_starts[line] + utf16_col_to_byte(line_text(line), pos.character))
+    };
+
+    let mut spans: Vec<(usize, usize, usize, &str)> = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        let start = offset(&edit.range.start)?;
+        let end = offset(&edit.range.end)?;
+        if end < start {
+            bail!(
+                "edit range ends before it starts (line {}:{} to {}:{})",
+                edit.range.start.line + 1,
+                edit.range.start.character,
+                edit.range.end.line + 1,
+                edit.range.end.character
+            );
+        }
+        spans.push((start, end, index, &edit.new_text));
+    }
+    spans.sort_by_key(|&(start, end, index, _)| (start, end, index));
+    for pair in spans.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            bail!("the server returned overlapping edits; refusing to apply them");
         }
     }
-    lines.join("\n")
+
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for (start, end, _, new_text) in spans {
+        out.push_str(&content[cursor..start]);
+        out.push_str(new_text);
+        cursor = end;
+    }
+    out.push_str(&content[cursor..]);
+    Ok(out)
 }
 
 pub async fn run_rename(
@@ -595,11 +685,9 @@ pub async fn run_rename(
         .await?;
 
     if result.is_null() {
-        println!(
-            "{}",
-            fmt.error("No rename edits returned — the server may not support renaming this symbol, or the position doesn't resolve to a renameable symbol. Run `lsp locate` first to confirm the position resolves where you expect.")
-        );
-        return Ok(());
+        // An error, not a printed message with exit code 0: nothing was
+        // renamed, and a caller checking the exit status must see that.
+        bail!("No rename edits returned — the server may not support renaming this symbol, or the position doesn't resolve to a renameable symbol. Run `lsp locate` first to confirm the position resolves where you expect.");
     }
     let edit: WorkspaceEdit = serde_json::from_value(result)?;
     let (files_with_edits, skipped_ops) = collect_edits(&edit);
@@ -621,7 +709,13 @@ pub async fn run_rename(
                     path.display()
                 )
             })?;
-            staged.push((path, apply_text_edits(&original, edits)));
+            let updated = apply_text_edits(&original, edits).map_err(|e| {
+                anyhow!(
+                    "Cannot apply rename to {} (no files were modified): {e}",
+                    path.display()
+                )
+            })?;
+            staged.push((path, updated));
         }
         for (path, updated) in staged {
             std::fs::write(&path, updated)
@@ -753,7 +847,7 @@ pub async fn run_reference(
         )
         .await?;
 
-    let all_locations: Vec<Location> = serde_json::from_value(result).unwrap_or_default();
+    let all_locations: Vec<Location> = decode_list(result, "references")?;
     let end = start_index
         .saturating_add(max_items)
         .min(all_locations.len());
@@ -857,22 +951,20 @@ pub async fn run_symbol(
         )
         .await?;
 
-    let symbols: Vec<DocumentSymbol> = serde_json::from_value(result).unwrap_or_default();
+    let symbols = decode_document_symbols(result)?;
     let lines: Vec<&str> = content.split('\n').collect();
 
     let target = find_deepest_containing(&symbols, pos.line);
     let Some(target) = target else {
-        // Same shape as `doc` and `rename` report their own "nothing
-        // here" case: a formatted result on stdout, exit 0. This used to
-        // write to stderr and `std::process::exit(1)` from inside a
-        // library function — skipping destructors, unreachable from a
-        // test without spawning a subprocess, and leaving an agent that
-        // captures stdout with nothing at all to parse.
-        println!(
-            "{}",
-            fmt.error(&format!("No symbol found at line {}", pos.line + 1))
+        // An error (exit 1, message on stderr) like every other "that
+        // position doesn't identify what you asked for": the scope was
+        // wrong, and a caller checking the exit status must see that. It
+        // used to print an error-shaped document with exit 0. (`doc` with
+        // no hover text is different: "no documentation" is an answer.)
+        bail!(
+            "No symbol found at line {}. Use `lsp outline` to see the file's symbols and their lines.",
+            pos.line + 1
         );
-        return Ok(());
     };
 
     let end = (target.range.end.line as usize + 1).min(lines.len());
@@ -1076,7 +1168,12 @@ async fn try_lsp_search(project_root: &str, query: &str) -> Result<Vec<SymbolInf
     // matched the running server and every Deno search silently fell
     // through to the BM25 index.
     let info = client
-        .create_server(&entry.path().to_string_lossy(), Some(project_root), None)
+        .create_server(
+            &entry.path().to_string_lossy(),
+            Some(project_root),
+            None,
+            None,
+        )
         .await?;
     let result = client
         .proxy_request(
@@ -1135,7 +1232,7 @@ mod tests {
     #[test]
     fn apply_text_edits_single_line_replace() {
         let content = "fn greet() {}\n";
-        let out = apply_text_edits(content, &[edit(0, 3, 0, 8, "say_hi")]);
+        let out = apply_text_edits(content, &[edit(0, 3, 0, 8, "say_hi")]).unwrap();
         assert_eq!(out, "fn say_hi() {}\n");
     }
 
@@ -1149,7 +1246,7 @@ mod tests {
         // `let s = "😀"; onewName);` — and, because this is the rename
         // write path, saving that to disk.
         let content = "let s = \"😀\"; oldName();\n";
-        let out = apply_text_edits(content, &[edit(0, 14, 0, 21, "newName")]);
+        let out = apply_text_edits(content, &[edit(0, 14, 0, 21, "newName")]).unwrap();
         assert_eq!(out, "let s = \"😀\"; newName();\n");
     }
 
@@ -1159,7 +1256,7 @@ mod tests {
         // under either interpretation — a guard that the fix didn't break
         // the majority case it used to get right.
         let content = "let café = 1; let oldName = 2;\n";
-        let out = apply_text_edits(content, &[edit(0, 18, 0, 25, "newName")]);
+        let out = apply_text_edits(content, &[edit(0, 18, 0, 25, "newName")]).unwrap();
         assert_eq!(out, "let café = 1; let newName = 2;\n");
     }
 
@@ -1169,7 +1266,7 @@ mod tests {
         // Start col 14 is just past the emoji on line 0. On line 2,
         // `end "😀" tail`, the emoji occupies UTF-16 columns 5-6, so
         // column 8 is the space before `tail` and column 9 is its `t`.
-        let out = apply_text_edits(content, &[edit(0, 14, 2, 8, "X")]);
+        let out = apply_text_edits(content, &[edit(0, 14, 2, 8, "X")]).unwrap();
         assert_eq!(out, "let a = \"😀\"; X tail\n");
     }
 
@@ -1181,7 +1278,7 @@ mod tests {
         // second edit changing line lengths above it.
         let content = "fn greet() {}\n\nfn call() {\n    greet();\n}\n";
         let edits = vec![edit(0, 3, 0, 8, "say_hi"), edit(3, 4, 3, 9, "say_hi")];
-        let out = apply_text_edits(content, &edits);
+        let out = apply_text_edits(content, &edits).unwrap();
         assert_eq!(out, "fn say_hi() {}\n\nfn call() {\n    say_hi();\n}\n");
     }
 
@@ -1191,17 +1288,104 @@ mod tests {
         // on line 2, so both parens are already outside the edit range —
         // new_text only needs to replace the parameter list between them.
         let content = "fn greet(\n    name: &str\n) {}\n";
-        let out = apply_text_edits(content, &[edit(0, 9, 2, 0, "")]);
+        let out = apply_text_edits(content, &[edit(0, 9, 2, 0, "")]).unwrap();
         assert_eq!(out, "fn greet() {}\n");
     }
 
     #[test]
-    fn apply_text_edits_out_of_range_line_is_skipped_not_panicking() {
-        // Defends against a stale WorkspaceEdit computed against content
-        // that's since shrunk — must not panic on an out-of-bounds index.
+    fn apply_text_edits_refuses_an_out_of_range_line_instead_of_skipping_it() {
+        // A stale WorkspaceEdit computed against content that has since
+        // shrunk. Skipping that one edit while applying the rest used to
+        // leave a half-renamed file behind.
         let content = "fn greet() {}\n";
-        let out = apply_text_edits(content, &[edit(50, 0, 50, 5, "x")]);
-        assert_eq!(out, content);
+        let err = apply_text_edits(
+            content,
+            &[edit(0, 3, 0, 8, "say_hi"), edit(50, 0, 50, 5, "x")],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("line 51"), "{err}");
+        // A multi-line edit whose *end* is out of range, likewise.
+        assert!(apply_text_edits(content, &[edit(0, 0, 9, 0, "")]).is_err());
+    }
+
+    #[test]
+    fn apply_text_edits_allows_the_position_after_a_trailing_newline() {
+        let out = apply_text_edits("a\n", &[edit(1, 0, 1, 0, "b\n")]).unwrap();
+        assert_eq!(out, "a\nb\n");
+    }
+
+    #[test]
+    fn apply_text_edits_refuses_overlapping_edits() {
+        let err = apply_text_edits("abcdef\n", &[edit(0, 0, 0, 4, "X"), edit(0, 2, 0, 6, "Y")])
+            .unwrap_err();
+        assert!(err.to_string().contains("overlapping"), "{err}");
+    }
+
+    #[test]
+    fn a_whole_file_edit_may_end_at_the_line_after_the_last() {
+        let out = apply_text_edits("a\nb", &[edit(0, 0, 2, 0, "X")]).unwrap();
+        assert_eq!(out, "X");
+    }
+
+    #[test]
+    fn the_out_of_range_error_counts_real_lines() {
+        let err = apply_text_edits("a\n", &[edit(5, 0, 5, 1, "x")]).unwrap_err();
+        assert!(err.to_string().contains("has 1 line(s)"), "{err}");
+    }
+
+    #[test]
+    fn apply_text_edits_refuses_a_backwards_range() {
+        assert!(apply_text_edits("abcdef\n", &[edit(0, 4, 0, 1, "X")]).is_err());
+    }
+
+    #[test]
+    fn same_position_inserts_are_applied_in_the_order_given() {
+        let out = apply_text_edits(
+            "fn f() {}\n",
+            &[edit(0, 0, 0, 0, "A"), edit(0, 0, 0, 0, "B")],
+        )
+        .unwrap();
+        assert_eq!(out, "ABfn f() {}\n");
+    }
+
+    #[test]
+    fn adjacent_edits_both_apply() {
+        let out = apply_text_edits(
+            "oldold\n",
+            &[edit(0, 3, 0, 6, "new"), edit(0, 0, 0, 3, "new")],
+        )
+        .unwrap();
+        assert_eq!(out, "newnew\n");
+    }
+
+    #[test]
+    fn a_column_past_the_line_end_clamps_before_a_crlf_line_ending() {
+        // Per the spec the line ending isn't part of the line, so an
+        // overlong character means "end of the text", not "after the \r".
+        let out = apply_text_edits("abc\r\ndef\r\n", &[edit(0, 1, 0, 99, "Z")]).unwrap();
+        assert_eq!(out, "aZ\r\ndef\r\n");
+    }
+
+    #[test]
+    fn collect_edits_merges_repeated_entries_for_one_file() {
+        let part = |e: TextEdit| {
+            DocumentChangeOp::Edit(TextDocumentEdit {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: "file:///a.rs".into(),
+                },
+                edits: vec![e],
+            })
+        };
+        let we = WorkspaceEdit {
+            changes: None,
+            document_changes: Some(vec![
+                part(edit(0, 0, 0, 1, "x")),
+                part(edit(1, 0, 1, 1, "y")),
+            ]),
+        };
+        let (files, _) = collect_edits(&we);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1.len(), 2);
     }
 
     #[test]

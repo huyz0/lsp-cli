@@ -827,17 +827,34 @@ async fn run_server(sub: &str, path: Option<&str>, all: bool, fmt: &OutputFormat
             }
         }
         "start" => {
-            client.ensure_running().await?;
+            // Absolute, and resolved here: the daemon's working directory
+            // is wherever it happened to be started, so a relative path
+            // used to be resolved against *that* and could start a server
+            // for a different project entirely.
             let target = match path {
-                Some(p) => p.to_string(),
+                Some(p) => std::path::Path::new(p)
+                    .canonicalize()
+                    .map_err(|e| anyhow::anyhow!("{p}: {e}"))?,
                 None => std::env::current_dir()
-                    .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?
-                    .to_string_lossy()
-                    .to_string(),
+                    .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?,
             };
+            let detected = registry::detect_for_path(&target).ok_or_else(|| {
+                anyhow::anyhow!("Cannot detect language for path: {}", target.display())
+            })?;
+            // Install on demand like every navigation command does;
+            // `server start` used to fail with "failed to spawn" instead.
+            let server_bin = install::ensure_installed(detected.lang.name).await?;
+            client.ensure_running().await?;
             // No root override: `server start` is given a path (often a
-            // bare directory) and wants the daemon's own detection.
-            let info = client.create_server(&target, None, None).await?;
+            // bare directory) and wants the daemon's own root detection.
+            let info = client
+                .create_server(
+                    &target.to_string_lossy(),
+                    None,
+                    server_bin.as_deref(),
+                    Some(detected.lang.name),
+                )
+                .await?;
             // Honour --output like `server list` does. These three arms
             // printed prose regardless of the format they were handed, so
             // `lsp server start` emitted a sentence even though JSON is

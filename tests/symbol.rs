@@ -79,18 +79,13 @@ fn exits_cleanly_when_no_symbol_at_location() {
         "--output",
         "json",
     ]);
-    // This used to assert nothing at all — it could only fail by hanging.
-    // `symbol` now reports "nothing here" the way `doc` and `rename` do:
-    // a formatted result on stdout, exit 0.
-    assert_eq!(result.exit_code, 0, "{}", result.stderr);
-    let data: serde_json::Value = serde_json::from_str(&result.stdout)
-        .unwrap_or_else(|e| panic!("expected JSON on stdout: {e}\nstdout: {}", result.stdout));
-    assert_eq!(data["kind"], "error");
+    // A wrong position is an error: exit 1, message on stderr, nothing on
+    // stdout for a caller to mistake for a result.
+    assert_eq!(result.exit_code, 1, "stdout: {}", result.stdout);
+    assert_eq!(result.stdout, "");
     assert!(
-        data["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("No symbol found")),
-        "unexpected message: {:?}",
-        data["message"]
+        result.stderr.contains("No symbol found at line 3"),
+        "unexpected message: {}",
+        result.stderr
     );
 }

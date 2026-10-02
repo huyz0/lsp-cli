@@ -144,3 +144,94 @@ fn server_list_does_not_report_every_server_as_just_started() {
     assert!(!list.contains("just_started"), "{list}");
     assert!(!list.contains("loading"), "{list}");
 }
+
+/// The item `prepareCallHierarchy` returns must go back to the server
+/// unchanged: servers keep state in its `data` field. It used to be decoded
+/// into a struct without `data` and re-encoded, so a server relying on it
+/// rejected the follow-up request.
+#[test]
+fn call_hierarchy_items_reach_the_server_with_their_data_intact() {
+    let p = project("calls-data", "fn target() {}\n");
+    let out = ok(
+        &p,
+        &[
+            "calls",
+            &p.file(),
+            "--scope",
+            "target",
+            "--direction",
+            "incoming",
+        ],
+    );
+    assert!(out.contains("caller_of_target"), "{out}");
+}
+
+/// A server answering `documentSymbol` in the flat `SymbolInformation[]`
+/// form got an empty outline: the reply failed to decode and the error was
+/// swallowed.
+#[test]
+fn a_flat_document_symbol_reply_still_produces_an_outline() {
+    let p = project("flat-symbols", "fn alpha() {}\nfn beta() {}\n");
+    p.set_env("FAKE_LSP_FLAT_SYMBOLS", "1");
+    let out = ok(&p, &["outline", &p.file()]);
+    let data: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "beta"], "{data}");
+}
+
+/// `--project` names the root for a file with no root marker above it. The
+/// CLI accepted that, but the daemon re-detected from markers alone and
+/// failed with "Cannot detect language for path".
+#[test]
+fn project_override_works_for_a_file_with_no_root_marker() {
+    let p = project("no-marker", "fn loose() {}\n");
+    std::fs::remove_file(p.dir.join("build.zig")).unwrap();
+    let dir = p.dir.display().to_string();
+    let without = p.run(&["outline", &p.file()]);
+    assert_eq!(
+        without.exit_code, 1,
+        "no marker and no --project: {}",
+        without.stdout
+    );
+    let out = ok(&p, &["outline", &p.file(), "--project", &dir]);
+    assert!(out.contains("\"loose\""), "{out}");
+}
+
+/// A relative path given to `server start` was resolved against the
+/// daemon's working directory, not the caller's.
+#[test]
+fn server_start_resolves_a_relative_path_against_the_caller() {
+    let p = project("start-relative", "fn a() {}\n");
+    // Daemon started from somewhere else entirely.
+    let r = p.run(&["server", "list"]);
+    assert_eq!(r.exit_code, 0);
+
+    let output = std::process::Command::new(support::bin_path())
+        .args(["server", "start", "proj", "--output", "json"])
+        .current_dir(p.home.path())
+        .env("LSP_CLI_HOME", p.home.path())
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", p.home.path().join("fakebin").display()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let root = std::fs::canonicalize(&p.dir).unwrap();
+    assert_eq!(
+        data["server"]["project_root"],
+        root.display().to_string(),
+        "{data}"
+    );
+}

@@ -68,8 +68,25 @@ query instead.
 | `42` | Line 42 |
 | `10,20` | Lines 10 to 20 |
 | `10,0` | Line 10 to end of file |
-| `MyClass` | The declaration of `MyClass` |
-| `MyClass.method` | `method` inside `MyClass` |
+| `MyClass` | The declaration of `MyClass`, through the end of its body |
+| `MyClass.method` | `method` inside `MyClass` (any depth: `a.b.c`) |
+
+One of `--scope` or `--find` is required: without either there is no
+position, and the command fails rather than guessing. A line past the end
+of the file is an error, not the last line.
+
+A symbol scope covers the symbol's whole body and nothing after it, so
+`--find` inside `--scope MyClass` only matches within `MyClass`, and
+`Parent.child` only finds a `child` that belongs to `Parent`: declared in
+its body, or for Rust in an `impl Parent` / `impl Trait for Parent` block,
+for Go as a method with a `Parent` receiver, for Lua as `function
+Parent.child`.
+
+If a name is declared in more than one block (an `area` method in two
+classes, say), the command fails and lists every candidate with its line:
+qualify it (`Circle.area`) or use the line number. Several declarations in
+the *same* block — overload signatures, a property's getter and setter —
+are one symbol, and resolve to the first.
 
 `--find <text>` narrows to an exact position inside that scope. It
 ignores whitespace differences, and `<|>` marks where the cursor should
@@ -98,6 +115,17 @@ resolve, fall back to a line number from `outline`.
 JSON by default, which is what to parse. `--output markdown` is for
 showing a human. `--dry-run` prints the request that would be sent without
 sending it.
+
+Positions in JSON output: `line` is **1-based** (matching `--scope`),
+`character` is a **0-based** offset in UTF-16 code units, as LSP itself
+counts (the same as a character count unless the line has emoji or other
+characters outside the Basic Multilingual Plane). Markdown output shows
+both 1-based.
+
+A failure exits 1 with the reason on stderr and nothing on stdout: a
+position that doesn't resolve, a `symbol` scope with no symbol at it, a
+`rename` the server can't perform. An empty result (no references, no
+documentation) is not a failure.
 
 `install` and `schema` take neither flag. `locate` and `server` take
 `--output` but not `--dry-run`.
@@ -131,6 +159,11 @@ which is worse than a wrong read-only answer. If the output reports
 skipped file operations, the rename also needed to move or create a file
 and is definitely incomplete. After `--apply`, search the old name to
 confirm nothing was missed.
+
+`--apply` is all or nothing: every file's edits are checked (in range,
+non-overlapping) before any file is written, and if one doesn't apply,
+nothing is written and the command fails. Files edited since the server
+last saw them are re-read first, so the edits match what is on disk.
 
 ### `reference` and `search` are paginated
 
@@ -204,13 +237,14 @@ Configuration lives in `~/.lsp-cli/config.json`, all durations in
 **seconds**:
 
 ```json
-{ "idleTimeout": 600, "managerTimeout": 60, "defaultMaxItems": 20 }
+{ "idleTimeout": 600, "managerTimeout": 60, "defaultMaxItems": 20, "usePathServers": true }
 ```
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
+| "`X` is declared N times in scope" | The error lists every declaration with its line. Qualify the name (`Parent.X`) or pass the line number. |
 | "Symbol not found", or a result from the wrong place | Run `lsp locate` with the same `--scope`/`--find` to see what position it resolved to. If a symbol path does not resolve, use a line number from `outline`. |
 | "Cannot detect project root" | The file is not under a recognized root marker. Pass `--project <path>`. |
 | "Unsupported file type" | The extension is not one of the supported languages. Use grep. |
