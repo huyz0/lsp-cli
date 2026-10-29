@@ -311,7 +311,11 @@ fn patterns_for(ext: &str) -> &'static [(regex::Regex, u32)] {
 /// enough to build a searchable symbol index without an LSP server.
 fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformation> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let uri = format!("file://{}", path.display());
+    // Percent-encoded like every other URI this tool builds (`lsp::uri`):
+    // the bare `file://{path}` this used to be is not a valid URI for a
+    // path with a space or `#` in it, and the formatter's decoding turned
+    // a literal `%` in a file name into a different, nonexistent path.
+    let uri = lsp::uri::from_path(path);
     let mut out = Vec::new();
 
     let patterns = patterns_for(ext);
@@ -328,7 +332,10 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
                         continue;
                     }
                     let name = m.as_str().to_string();
-                    let col = m.start() as u32;
+                    // UTF-16 code units, as LSP positions are everywhere
+                    // else, not the byte offset the regex reports.
+                    let col = lsp::text_pos::byte_to_utf16_col(line, m.start());
+                    let end_col = lsp::text_pos::byte_to_utf16_col(line, m.end());
                     out.push(SymbolInformation {
                         name,
                         kind: *kind,
@@ -341,7 +348,7 @@ fn extract_symbols(path: &std::path::Path, content: &str) -> Vec<SymbolInformati
                                 },
                                 end: Position {
                                     line: i as u32,
-                                    character: col + m.as_str().len() as u32,
+                                    character: end_col,
                                 },
                             },
                         },
@@ -1142,6 +1149,25 @@ impl Cache {}
             "pub struct User {}\n",
         );
         assert_eq!(syms[0].location.uri, "file:///abs/path/user.rs");
+    }
+
+    #[test]
+    fn record_uris_are_percent_encoded() {
+        let path = std::path::Path::new("/my proj/100%/user.rs");
+        let syms = extract_symbols(path, "pub struct User {}\n");
+        assert_eq!(syms[0].location.uri, "file:///my%20proj/100%25/user.rs");
+        assert_eq!(lsp::uri::to_path(&syms[0].location.uri), path);
+    }
+
+    #[test]
+    fn record_columns_are_utf16_code_units() {
+        // "😀" is four bytes but two UTF-16 units.
+        let syms = extract_symbols(
+            std::path::Path::new("/p/index.html"),
+            "<p title=\"😀\" id=\"target\">\n",
+        );
+        let range = syms[0].location.range;
+        assert_eq!((range.start.character, range.end.character), (18, 24));
     }
 
     // --- TreeFingerprint ----------------------------------------------
