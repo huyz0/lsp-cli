@@ -434,6 +434,20 @@ impl TreeFingerprint {
     }
 }
 
+/// Files larger than this are left out of the index.
+///
+/// Source anyone searches by symbol name is far smaller; files past this
+/// are generated — bundles, minified output, data dumps — and every index
+/// rebuild read each one whole and ran the line regexes over all of it,
+/// filling the index (and the daemon's memory) with names nobody wrote.
+const MAX_INDEXED_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Generated lockfiles that happen to have an indexed extension. An npm
+/// lockfile is several megabytes of `"version"`, `"resolved"` and
+/// `"integrity"` keys, one set per dependency, which crowded real JSON keys
+/// out of every search for those words.
+const NOT_INDEXED_FILE_NAMES: &[&str] = &["package-lock.json", "npm-shrinkwrap.json"];
+
 /// Every indexable source file under `project_root`, with the shared
 /// ignore list applied.
 fn source_files(project_root: &str) -> impl Iterator<Item = walkdir::DirEntry> {
@@ -451,6 +465,11 @@ fn source_files(project_root: &str) -> impl Iterator<Item = walkdir::DirEntry> {
         .filter(|e| {
             let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("");
             source_exts().contains(&ext.to_ascii_lowercase())
+        })
+        .filter(|e| !NOT_INDEXED_FILE_NAMES.contains(&e.file_name().to_string_lossy().as_ref()))
+        .filter(|e| {
+            e.metadata()
+                .is_ok_and(|m| m.len() <= MAX_INDEXED_FILE_BYTES)
         })
 }
 
@@ -1207,6 +1226,27 @@ impl Cache {}
 
     fn write(dir: &std::path::Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    #[test]
+    fn oversized_files_and_lockfiles_are_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "small.rs", "pub fn keptsymbol() {}\n");
+        let mut big = String::from("pub fn generatedsymbol() {}\n");
+        while big.len() as u64 <= MAX_INDEXED_FILE_BYTES {
+            big.push_str("// padding padding padding padding padding padding\n");
+        }
+        write(dir.path(), "big.rs", &big);
+        write(
+            dir.path(),
+            "package-lock.json",
+            "{\n  \"lockfileVersion\": 3\n}\n",
+        );
+        let index = Bm25Index::build(dir.path().to_str().unwrap());
+        let found = |q: &str| !index.search(q).is_empty();
+        assert!(found("keptsymbol"));
+        assert!(!found("generatedsymbol"));
+        assert!(!found("lockfile"));
     }
 
     #[test]
