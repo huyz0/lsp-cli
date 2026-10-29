@@ -615,19 +615,47 @@ impl Manager {
                 .collect()
         };
 
-        let mut stale_keys = Vec::new();
+        let mut stale = Vec::new();
         for (key, client, idle_since) in snapshot {
-            let alive = client.lock().await.is_alive();
+            // A client whose lock is held is answering a request right now,
+            // so it is alive and in use. Waiting for the lock stalled the
+            // whole scan behind that request, for up to the 120s ceiling.
+            let Ok(mut c) = client.try_lock() else {
+                continue;
+            };
+            // Between commands nobody reads what a server sends, so its
+            // notifications (diagnostics for every file the watcher reports)
+            // queued without bound, and requests it made of us went
+            // unanswered until the next command. Catch up on them here.
+            c.drain_pending_notifications().await;
+            let alive = c.is_alive();
+            drop(c);
             if !alive || is_stale(idle_since, now, cutoff_ms) {
-                stale_keys.push(key);
+                stale.push((key, client, alive));
             }
         }
 
         let removed: Vec<ManagedServer> = {
             let mut servers = self.servers.lock().await;
-            stale_keys
+            let now = now_ms();
+            stale
                 .into_iter()
-                .filter_map(|key| servers.remove(&key))
+                .filter_map(|(key, client, alive)| {
+                    // Judge the entry as it is now, not as it was in the
+                    // snapshot: a command may have started using it since
+                    // (`create` and every request touch `idle_since`), or
+                    // `create` may have replaced it. Removing on the old
+                    // verdict shut down a server a command had just been
+                    // handed.
+                    let entry = servers.get(&key)?;
+                    let still_stale = Arc::ptr_eq(&entry.client, &client)
+                        && (!alive || is_stale(entry.info.idle_since, now, cutoff_ms));
+                    if still_stale {
+                        servers.remove(&key)
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
 
