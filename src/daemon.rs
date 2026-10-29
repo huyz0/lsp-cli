@@ -659,11 +659,11 @@ impl Manager {
                 .collect()
         };
 
-        let mut removed_roots = Vec::new();
-        for entry in removed {
-            entry.client.lock().await.shutdown().await;
-            removed_roots.push(entry.info.project_root);
-        }
+        let removed_roots: Vec<String> = removed
+            .iter()
+            .map(|e| e.info.project_root.clone())
+            .collect();
+        shutdown_clients(removed.into_iter().map(|e| e.client)).await;
         for root in removed_roots {
             self.stop_watcher_if_unused(&root).await;
         }
@@ -764,10 +764,12 @@ impl Manager {
         };
 
         let mut stopped = Vec::new();
+        let mut clients = Vec::new();
         for entry in removed {
-            entry.client.lock().await.shutdown().await;
+            clients.push(entry.client);
             stopped.push(entry.info);
         }
+        shutdown_clients(clients).await;
         let mut seen_roots = std::collections::HashSet::new();
         for info in &stopped {
             if seen_roots.insert(info.project_root.clone()) {
@@ -776,6 +778,19 @@ impl Manager {
         }
         stopped
     }
+}
+
+/// Shuts down every one of `clients` at once.
+///
+/// `shutdown()` waits up to 3s for a server to answer, and each one used to
+/// wait its turn: `lsp server stop --all`, an idle sweep, or the daemon
+/// exiting with five warm servers took up to 15s instead of 3.
+async fn shutdown_clients(clients: impl IntoIterator<Item = Arc<Mutex<LspClient>>>) {
+    let mut tasks = tokio::task::JoinSet::new();
+    for client in clients {
+        tasks.spawn(async move { client.lock().await.shutdown().await });
+    }
+    while tasks.join_next().await.is_some() {}
 }
 
 fn now_ms() -> i64 {
@@ -1183,9 +1198,7 @@ impl Manager {
             let servers = self.servers.lock().await;
             servers.values().map(|s| s.client.clone()).collect()
         };
-        for client in clients {
-            client.lock().await.shutdown().await;
-        }
+        shutdown_clients(clients).await;
         self.watcher.dispose().await;
     }
 
