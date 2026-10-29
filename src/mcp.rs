@@ -97,7 +97,11 @@ pub fn run_mcp_stdio(project: Option<&str>) -> Result<()> {
                     if let (Some(p), true) = (project, accepts_project) {
                         cmd.arg("--project").arg(p);
                     }
-                    let output = cmd.output();
+                    // Not our stdin: that is the MCP stream itself, and a
+                    // tool process (or anything it starts, such as an
+                    // installer) that read from it would consume the
+                    // client's next requests.
+                    let output = cmd.stdin(std::process::Stdio::null()).output();
                     match output {
                         Ok(out) => {
                             let is_error = !out.status.success();
