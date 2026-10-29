@@ -97,6 +97,11 @@ pub struct LspClient {
     saw_progress: bool,
     /// rust-analyzer's `experimental/serverStatus` `quiescent` flag.
     quiescent: Option<bool>,
+    /// Set for the duration of a write to the server's stdin. Still set
+    /// when the next write starts means the previous one never finished:
+    /// its future was dropped part-way (`request`'s 120s ceiling,
+    /// `shutdown`'s 3s one) or it failed. See `send`.
+    write_pending: bool,
 }
 
 /// The last lines a server wrote to stderr: kept so a crash can be
@@ -247,6 +252,7 @@ impl LspClient {
             active_progress: std::collections::HashSet::new(),
             saw_progress: false,
             quiescent: None,
+            write_pending: false,
         })
     }
 
@@ -258,15 +264,36 @@ impl LspClient {
     /// Best-effort liveness check: `true` unless the child has already
     /// exited (or we failed to check, in which case we optimistically say
     /// it's still alive rather than false-positively reporting it dead).
+    ///
+    /// A server whose input stream was cut off mid-message counts as dead:
+    /// it is still running, but nothing sent to it can be framed correctly
+    /// again (see `send`), so the daemon has to replace it.
     pub fn is_alive(&mut self) -> bool {
-        !matches!(self.child.try_wait(), Ok(Some(_)))
+        !self.write_pending && !matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
     async fn send(&mut self, msg: &Value) -> Result<()> {
+        if self.write_pending {
+            // The previous message was only partly written: a timeout
+            // dropped `request` while `write_all` was blocked on a full
+            // pipe (a server busy enough to stop reading its input), or the
+            // write failed. The server now holds a truncated frame, and
+            // whatever is written next gets read as the rest of its body —
+            // every later message is misframed, and the server answers
+            // nothing until it is restarted. It used to stay registered as
+            // healthy, failing every command against the project with
+            // timeouts. Stop it, so the next `create` starts a fresh one.
+            let _ = self.child.start_kill();
+            return Err(anyhow!(
+                "the connection to the language server was cut off in the middle of a message; the server has been stopped and will be restarted by the next command"
+            ));
+        }
         let body = serde_json::to_string(msg)?;
         let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        self.write_pending = true;
         self.stdin.write_all(framed.as_bytes()).await?;
         self.stdin.flush().await?;
+        self.write_pending = false;
         Ok(())
     }
 
@@ -942,6 +969,26 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_write_cut_off_part_way_marks_the_server_dead_instead_of_desyncing_it() {
+        // `sleep` never reads its stdin, so a message bigger than the pipe
+        // buffer blocks in `write_all` until the timeout drops it with
+        // part of the frame written.
+        let mut client = LspClient::spawn("sleep", &["30".to_string()], "/")
+            .await
+            .unwrap();
+        assert!(client.is_alive());
+        let big = "x".repeat(4 * 1024 * 1024);
+        let cut_off = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            client.notify("textDocument/didOpen", json!({ "text": big })),
+        )
+        .await;
+        assert!(cut_off.is_err(), "the write should have blocked");
+        assert!(!client.is_alive(), "a desynced server must not be reused");
+        assert!(client.notify("initialized", json!({})).await.is_err());
+    }
 
     #[test]
     fn the_stderr_tail_keeps_only_the_last_lines_and_caps_their_length() {
