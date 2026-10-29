@@ -1097,60 +1097,28 @@ pub async fn run_search(
         return Ok(());
     }
 
+    let kind_ids = kind_ids(kinds)?;
+
     // A language server's `workspace/symbol` when one is already warm for
     // this project; otherwise (or if it finds nothing) the self-built BM25
     // index. See `try_lsp_search` for why search never starts a server.
-    let mut results: Vec<SymbolInformation> = try_lsp_search(&project_root, query)
+    let lsp_results: Vec<SymbolInformation> = try_lsp_search(&project_root, query)
         .await
         .unwrap_or_default();
-    let backend = if results.is_empty() {
-        results = bm25_search(&project_root, query).await;
-        "bm25"
+    let (backend, total, page) = if lsp_results.is_empty() {
+        let (total, page) = bm25_search(
+            &project_root,
+            query,
+            kind_ids.as_ref(),
+            start_index,
+            max_items,
+        )
+        .await;
+        ("bm25", total, page)
     } else {
-        "lsp"
-    };
-
-    if let Some(kinds) = kinds {
-        // Reject unknown values rather than filtering everything away. An
-        // unrecognized `--kinds` used to contribute nothing to the id set,
-        // so `--kinds klass` returned zero results and exit 0 — a silent
-        // wrong answer, indistinguishable from "no such symbol", and the
-        // opposite of how every other enum-valued flag here behaves.
-        let mut unknown: Vec<&str> = kinds
-            .iter()
-            .filter(|name| {
-                !ALL_SYMBOL_KIND_IDS
-                    .iter()
-                    .any(|k| symbol_kind_name(*k) == *name)
-            })
-            .map(|s| s.as_str())
-            .collect();
-        unknown.sort_unstable();
-        if !unknown.is_empty() {
-            let valid: Vec<&str> = ALL_SYMBOL_KIND_IDS
-                .iter()
-                .map(|k| symbol_kind_name(*k))
-                .collect();
-            bail!(
-                "Unknown --kinds value(s): {} (expected one of: {})",
-                unknown.join(", "),
-                valid.join(", ")
-            );
-        }
-        let kind_ids: std::collections::HashSet<u32> = ALL_SYMBOL_KIND_IDS
-            .iter()
-            .copied()
-            .filter(|k| kinds.iter().any(|name| symbol_kind_name(*k) == name))
-            .collect();
-        results.retain(|s| kind_ids.contains(&s.kind));
-    }
-
-    let total = results.len();
-    let end = start_index.saturating_add(max_items).min(total);
-    let page = if start_index < total {
-        &results[start_index..end]
-    } else {
-        &[]
+        let (total, page) =
+            crate::bm25::page_of(&lsp_results, kind_ids.as_ref(), start_index, max_items);
+        ("lsp", total, page)
     };
 
     println!(
@@ -1158,7 +1126,7 @@ pub async fn run_search(
         fmt.search(
             query,
             backend,
-            page,
+            &page,
             total,
             start_index,
             start_index.saturating_add(max_items)
@@ -1167,24 +1135,76 @@ pub async fn run_search(
     Ok(())
 }
 
-/// BM25 fallback search.
+/// The symbol kind ids `--kinds` names, or `None` for every kind.
+///
+/// Unknown values are rejected rather than filtering everything away. An
+/// unrecognized `--kinds` used to contribute nothing to the id set, so
+/// `--kinds klass` returned zero results and exit 0 — a silent wrong
+/// answer, indistinguishable from "no such symbol", and the opposite of how
+/// every other enum-valued flag here behaves.
+fn kind_ids(kinds: Option<Vec<String>>) -> Result<Option<std::collections::HashSet<u32>>> {
+    let Some(kinds) = kinds else {
+        return Ok(None);
+    };
+    let mut unknown: Vec<&str> = kinds
+        .iter()
+        .filter(|name| {
+            !ALL_SYMBOL_KIND_IDS
+                .iter()
+                .any(|k| symbol_kind_name(*k) == *name)
+        })
+        .map(|s| s.as_str())
+        .collect();
+    unknown.sort_unstable();
+    if !unknown.is_empty() {
+        let valid: Vec<&str> = ALL_SYMBOL_KIND_IDS
+            .iter()
+            .map(|k| symbol_kind_name(*k))
+            .collect();
+        bail!(
+            "Unknown --kinds value(s): {} (expected one of: {})",
+            unknown.join(", "),
+            valid.join(", ")
+        );
+    }
+    Ok(Some(
+        ALL_SYMBOL_KIND_IDS
+            .iter()
+            .copied()
+            .filter(|k| kinds.iter().any(|name| symbol_kind_name(*k) == name))
+            .collect(),
+    ))
+}
+
+/// BM25 fallback search: how many symbols match, and one page of them.
 ///
 /// Prefers the daemon, which caches the index per project and rebuilds it
 /// only when the tree actually changes. Falls back to building in-process
 /// if the daemon can't be reached, so `lsp search` still works with no
 /// daemon available — just without the caching.
-async fn bm25_search(project_root: &str, query: &str) -> Vec<SymbolInformation> {
+async fn bm25_search(
+    project_root: &str,
+    query: &str,
+    kinds: Option<&std::collections::HashSet<u32>>,
+    start_index: usize,
+    max_items: usize,
+) -> (usize, Vec<SymbolInformation>) {
     let client = ManagerClient::new();
     if client.ensure_running().await.is_ok() {
-        if let Ok(results) = client.search(project_root, query).await {
-            return results;
+        if let Ok(found) = client
+            .search(project_root, query, kinds, start_index, max_items)
+            .await
+        {
+            return found;
         }
     }
-    Bm25Index::build(project_root)
-        .search(query)
-        .into_iter()
-        .map(|(_, s)| s.clone())
-        .collect()
+    let index = Bm25Index::build(project_root);
+    crate::bm25::page_of(
+        index.search(query).into_iter().map(|(_, s)| s),
+        kinds,
+        start_index,
+        max_items,
+    )
 }
 
 /// The project `search` covers: `--project` if given, else the nearest

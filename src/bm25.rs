@@ -607,6 +607,33 @@ impl Bm25Index {
     }
 }
 
+/// One page of `results` that pass the `kinds` filter (every kind when
+/// `None`), plus how many passed in all.
+///
+/// Only the page is cloned. Callers used to clone every match, and the
+/// daemon then serialized all of them over its socket so the CLI could
+/// keep twenty: a short prefix such as `get` or `a` matches a large share
+/// of a big project's symbols.
+pub fn page_of<'a>(
+    results: impl IntoIterator<Item = &'a SymbolInformation>,
+    kinds: Option<&std::collections::HashSet<u32>>,
+    start_index: usize,
+    max_items: usize,
+) -> (usize, Vec<SymbolInformation>) {
+    let mut total = 0;
+    let mut page = Vec::new();
+    for sym in results {
+        if kinds.is_some_and(|k| !k.contains(&sym.kind)) {
+            continue;
+        }
+        if total >= start_index && page.len() < max_items {
+            page.push(sym.clone());
+        }
+        total += 1;
+    }
+    (total, page)
+}
+
 /// Highest score first; ties broken by location and name. Without the
 /// tiebreak, equal scores kept the directory walk's order, which can
 /// change between index builds — so the same query could page differently
@@ -776,6 +803,30 @@ mod tests {
         assert_eq!(found, expected);
         assert!(found.contains(&"user"));
         assert!(!found.contains(&"account"));
+    }
+
+    #[test]
+    fn page_of_counts_every_match_but_clones_only_the_page() {
+        let syms: Vec<SymbolInformation> = (0..10)
+            .map(|i| SymbolInformation {
+                kind: if i % 2 == 0 { FUNCTION } else { CLASS },
+                ..sym(&format!("s{i}"))
+            })
+            .collect();
+        let (total, page) = page_of(&syms, None, 3, 4);
+        assert_eq!(total, 10);
+        assert_eq!(
+            page.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["s3", "s4", "s5", "s6"]
+        );
+        let classes: std::collections::HashSet<u32> = [CLASS].into();
+        let (total, page) = page_of(&syms, Some(&classes), 1, 2);
+        assert_eq!(total, 5);
+        assert_eq!(
+            page.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["s3", "s5"]
+        );
+        assert!(page_of(&syms, None, 50, 5).1.is_empty());
     }
 
     #[test]

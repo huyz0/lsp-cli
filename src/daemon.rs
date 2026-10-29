@@ -91,6 +91,16 @@ pub struct DeleteRequest {
 pub struct SearchRequest {
     pub project_root: String,
     pub query: String,
+    /// Only symbols of these kinds.
+    #[serde(default)]
+    pub kinds: Option<std::collections::HashSet<u32>>,
+    #[serde(default)]
+    pub start_index: usize,
+    /// When given, the reply is one page, `{"total": n, "items": [...]}`.
+    /// Without it, every match as a bare list, which is what a CLI from
+    /// before paging moved here expects.
+    #[serde(default)]
+    pub max_items: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -687,7 +697,10 @@ impl Manager {
         &self,
         project_root: &str,
         query: &str,
-    ) -> Vec<crate::protocol::SymbolInformation> {
+        kinds: Option<&std::collections::HashSet<u32>>,
+        start_index: usize,
+        max_items: usize,
+    ) -> (usize, Vec<crate::protocol::SymbolInformation>) {
         let fingerprint = {
             let root = project_root.to_string();
             // Blocking filesystem work; keep it off the async runtime's
@@ -729,11 +742,12 @@ impl Manager {
             }
         };
 
-        index
-            .search(query)
-            .into_iter()
-            .map(|(_, sym)| sym.clone())
-            .collect()
+        crate::bm25::page_of(
+            index.search(query).into_iter().map(|(_, sym)| sym),
+            kinds,
+            start_index,
+            max_items,
+        )
     }
 
     pub async fn delete(&self, req: DeleteRequest) -> Vec<ManagedServerInfo> {
@@ -1118,8 +1132,20 @@ async fn notify_handler(
 async fn search_handler(
     State(m): State<SharedManager>,
     Json(req): Json<SearchRequest>,
-) -> Json<Vec<crate::protocol::SymbolInformation>> {
-    Json(m.search(&req.project_root, &req.query).await)
+) -> Json<Value> {
+    let (total, items) = m
+        .search(
+            &req.project_root,
+            &req.query,
+            req.kinds.as_ref(),
+            req.start_index,
+            req.max_items.unwrap_or(usize::MAX),
+        )
+        .await;
+    Json(match req.max_items {
+        Some(_) => serde_json::json!({ "total": total, "items": items }),
+        None => serde_json::json!(items),
+    })
 }
 
 /// The socket this daemon bound: its path and inode.

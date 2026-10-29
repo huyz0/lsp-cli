@@ -258,17 +258,36 @@ impl ManagerClient {
     /// invocations: building one reads every source file in the project,
     /// which the CLI process used to redo from scratch on every search and
     /// then throw away at exit.
+    ///
+    /// Filtered by `kinds` and paged in the daemon, so only the page
+    /// crosses the socket. Returns the number of matches and the page.
     pub async fn search(
         &self,
         project_root: &str,
         query: &str,
-    ) -> Result<Vec<crate::protocol::SymbolInformation>> {
-        let body = serde_json::json!({ "project_root": project_root, "query": query }).to_string();
+        kinds: Option<&std::collections::HashSet<u32>>,
+        start_index: usize,
+        max_items: usize,
+    ) -> Result<(usize, Vec<crate::protocol::SymbolInformation>)> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            total: usize,
+            items: Vec<crate::protocol::SymbolInformation>,
+        }
+        let body = serde_json::json!({
+            "project_root": project_root,
+            "query": query,
+            "kinds": kinds,
+            "start_index": start_index,
+            "max_items": max_items,
+        })
+        .to_string();
         let (status, resp) = raw_request("POST", "/search", Some(body)).await?;
         if status != 200 {
             bail!("{resp}");
         }
-        Ok(serde_json::from_str(&resp)?)
+        let page: Page = serde_json::from_str(&resp)?;
+        Ok((page.total, page.items))
     }
 
     pub async fn delete_servers(
