@@ -77,13 +77,17 @@ fn watch_tree(watcher: &mut notify::RecommendedWatcher, dir: &Path) -> usize {
 /// newly created directory has to be picked up explicitly — and it may
 /// arrive already populated (a `git checkout`, an extracted archive), so
 /// its whole subtree is registered, not just the directory itself.
+///
+/// A directory can also appear by being renamed: moved in from outside
+/// the project, or to a new name inside it. Only creations used to count,
+/// so nothing under a moved-in directory was ever watched.
 async fn maintain_watches(
     watcher: &std::sync::Weak<Mutex<notify::RecommendedWatcher>>,
     event: &notify::Event,
 ) {
     let relevant = matches!(
         event.kind,
-        EventKind::Create(_) | EventKind::Remove(_)
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
     );
     if !relevant {
         return;
@@ -103,9 +107,10 @@ async fn maintain_watches(
         if path.is_dir() {
             watch_tree(&mut guard, path);
         } else {
-            // A removed directory: `is_dir()` is false now, so this is the
-            // same call either way. `notify` errors when the path was
-            // never watched, which is expected for plain files.
+            // A removed (or renamed-away) directory: `is_dir()` is false
+            // now, so this is the same call either way. `notify` errors
+            // when the path was never watched, which is expected for plain
+            // files.
             let _ = guard.unwatch(path);
         }
     }
@@ -714,6 +719,32 @@ mod tests {
         manager.ensure_watching(root_str, &[".json"]).await;
         let file = root.join("data.json");
         std::fs::write(&file, "{}").unwrap();
+        let changes = next_batch(&mut rx).await;
+        assert!(
+            uris(&changes).contains(&lsp::uri::from_path(&file)),
+            "{changes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_moved_into_the_project_is_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(base.join("outside/nested")).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let manager = WatcherManager::new(tx);
+        manager
+            .ensure_watching(root.to_str().unwrap(), &[".ts"])
+            .await;
+
+        std::fs::rename(base.join("outside"), root.join("moved")).unwrap();
+        // Give the watcher a moment to see the rename before writing
+        // inside the moved directory.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let file = root.join("moved/nested/a.ts");
+        std::fs::write(&file, "export {}").unwrap();
         let changes = next_batch(&mut rx).await;
         assert!(
             uris(&changes).contains(&lsp::uri::from_path(&file)),
