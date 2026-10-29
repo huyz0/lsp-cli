@@ -1198,6 +1198,16 @@ async fn shutdown_handler(
     axum::http::StatusCode::NO_CONTENT
 }
 
+/// Largest request body the daemon accepts.
+///
+/// `/notify` carries the full text of the file a command targets (its
+/// `didOpen`), JSON-escaped. axum's `Json` extractor defaults to a 2 MiB
+/// limit, so every navigation command on a source file of roughly 2 MB or
+/// more (generated code, a large data file) failed with "length limit
+/// exceeded" before the language server was ever asked. The socket is
+/// private to this user, so the limit only has to stop a runaway client.
+const MAX_REQUEST_BODY: usize = 256 * 1024 * 1024;
+
 pub fn app(manager: SharedManager) -> Router {
     Router::new()
         .route("/list", get(list_handler))
@@ -1207,6 +1217,7 @@ pub fn app(manager: SharedManager) -> Router {
         .route("/request", post(request_handler))
         .route("/notify", post(notify_handler))
         .route("/shutdown", post(shutdown_handler))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .with_state(manager)
 }
 

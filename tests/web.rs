@@ -132,3 +132,36 @@ fn html_outline_is_hierarchical_and_names_id_class() {
         "expected h1#greeting (tag#id naming) in {body_names:?}"
     );
 }
+
+#[test]
+fn a_file_larger_than_two_megabytes_can_be_outlined() {
+    if !has_json_server() {
+        eprintln!("skipping: lsp-json-lsp not built");
+        return;
+    }
+    // The file's text travels to the daemon inside the `/notify` body,
+    // which axum capped at 2 MiB by default: every command on a file this
+    // size failed with "length limit exceeded".
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.json");
+    let filler = "x".repeat(100);
+    let mut body = String::from("{\n  \"first\": 1,\n  \"rows\": [\n");
+    for i in 0..30_000 {
+        body.push_str(&format!("    \"{filler}{i}\",\n"));
+    }
+    body.push_str("    \"end\"\n  ],\n  \"last\": 2\n}\n");
+    assert!(body.len() > 3 * 1024 * 1024);
+    std::fs::write(&file, body).unwrap();
+
+    let data = lsp_json(&["outline", file.to_str().unwrap(), "--all"]);
+    let names: Vec<&str> = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"first") && names.contains(&"last"),
+        "{names:?}"
+    );
+}
