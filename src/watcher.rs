@@ -32,6 +32,9 @@ struct WatcherHandle {
     // channel, which ends the debounce task's `recv()` loop naturally. The
     // task itself holds a `Weak`, so it cannot keep the watcher alive.
     _watcher: Arc<Mutex<notify::RecommendedWatcher>>,
+    /// Extensions reported for this root: the union over every language
+    /// with a server here. Shared with the debounce task.
+    extensions: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 /// How long to wait for the tree to go quiet before flushing a batch.
@@ -78,7 +81,10 @@ async fn maintain_watches(
     watcher: &std::sync::Weak<Mutex<notify::RecommendedWatcher>>,
     event: &notify::Event,
 ) {
-    let relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_));
+    let relevant = matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Remove(_)
+    );
     if !relevant {
         return;
     }
@@ -125,12 +131,19 @@ impl WatcherManager {
     }
 
     /// Starts watching `project_root` for changes to files with the given
-    /// extensions, if not already watching it. Extensions are fixed at
-    /// first watch (matching the TS original's practical behavior — the
-    /// common case is one language server per project root).
+    /// extensions, or adds them to the root's watch if there is one.
+    ///
+    /// Extensions used to be fixed by whichever server started first, so a
+    /// second language in the same root (JSON or CSS next to TypeScript,
+    /// say) never heard about a single change to its files.
     pub async fn ensure_watching(&self, project_root: &str, extensions: &[&str]) {
         let mut watchers = self.watchers.lock().await;
-        if watchers.contains_key(project_root) {
+        if let Some(handle) = watchers.get(project_root) {
+            handle
+                .extensions
+                .write()
+                .unwrap()
+                .extend(extensions.iter().map(|s| s.to_lowercase()));
             return;
         }
 
@@ -169,7 +182,10 @@ impl WatcherManager {
             return;
         }
 
-        let extensions: HashSet<String> = extensions.iter().map(|s| s.to_lowercase()).collect();
+        let extensions: Arc<std::sync::RwLock<HashSet<String>>> = Arc::new(std::sync::RwLock::new(
+            extensions.iter().map(|s| s.to_lowercase()).collect(),
+        ));
+        let task_extensions = extensions.clone();
         let root = project_root.to_string();
         let batch_tx = self.tx.clone();
         // Weak, deliberately: the strong reference lives in the
@@ -187,15 +203,15 @@ impl WatcherManager {
         let task_pending = pending.clone();
         tokio::spawn(async move {
             let pending = task_pending;
+            let extensions = task_extensions;
+            let changes_of =
+                |event: &notify::Event| to_change(event, &root, &extensions.read().unwrap());
             // Block for the first event in a batch, then drain anything
             // else that arrives within the debounce window before flushing.
             while let Some(first) = event_rx.recv().await {
                 let flush_by = std::time::Instant::now() + MAX_BATCH_WINDOW;
                 maintain_watches(&watcher_ref, &first).await;
-                pending
-                    .lock()
-                    .unwrap()
-                    .extend(to_change(&first, &root, &extensions));
+                pending.lock().unwrap().extend(changes_of(&first));
                 loop {
                     // The debounce window re-arms on every event, so a
                     // continuous stream (a build, an `npm install`) could
@@ -210,10 +226,7 @@ impl WatcherManager {
                     match tokio::time::timeout(window, event_rx.recv()).await {
                         Ok(Some(e)) => {
                             maintain_watches(&watcher_ref, &e).await;
-                            pending
-                                .lock()
-                                .unwrap()
-                                .extend(to_change(&e, &root, &extensions));
+                            pending.lock().unwrap().extend(changes_of(&e));
                         }
                         // Quiet for a full debounce window, or the sender
                         // is gone; either way the batch is done.
@@ -236,7 +249,10 @@ impl WatcherManager {
 
         watchers.insert(
             project_root.to_string(),
-            WatcherHandle { _watcher: watcher },
+            WatcherHandle {
+                _watcher: watcher,
+                extensions,
+            },
         );
     }
 
@@ -665,6 +681,44 @@ mod tests {
         let mut watcher = new_watcher();
         // root, a, a/b, a/b/c, d
         assert_eq!(watch_tree(&mut watcher, dir.path()), 5);
+    }
+
+    /// The next batch the watcher sends, if one arrives within a few
+    /// seconds.
+    async fn next_batch(rx: &mut mpsc::UnboundedReceiver<WatchBatch>) -> Vec<Value> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, changes)| changes)
+            .unwrap_or_default()
+    }
+
+    fn uris(changes: &[Value]) -> Vec<String> {
+        changes
+            .iter()
+            .map(|c| c["uri"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_second_language_in_the_same_root_adds_its_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let root_str = root.to_str().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let manager = WatcherManager::new(tx);
+        manager.ensure_watching(root_str, &[".ts"]).await;
+        // A JSON server started later for the same root used to be told
+        // about nothing: the root's extensions were the first server's.
+        manager.ensure_watching(root_str, &[".json"]).await;
+        let file = root.join("data.json");
+        std::fs::write(&file, "{}").unwrap();
+        let changes = next_batch(&mut rx).await;
+        assert!(
+            uris(&changes).contains(&lsp::uri::from_path(&file)),
+            "{changes:?}"
+        );
     }
 
     #[test]
