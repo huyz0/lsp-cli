@@ -515,9 +515,15 @@ fn unique_temp_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-async fn download_bytes(url: &str) -> Result<Vec<u8>> {
+/// Downloads `url` into a new file at `dest`, a chunk at a time.
+///
+/// Archives used to be buffered whole in memory, copied once more
+/// (`bytes().to_vec()`), and only then written out: two copies of a
+/// download that runs to a hundred megabytes for clangd or jdtls.
+async fn download_to(url: &str, dest: &Path) -> Result<()> {
+    use std::io::Write;
     let client = http_client()?;
-    let resp = client
+    let mut resp = client
         .get(url)
         .header("User-Agent", "lsp-cli")
         .send()
@@ -525,7 +531,17 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>> {
     if !resp.status().is_success() {
         bail!("Download failed: HTTP {} for {url}", resp.status());
     }
-    Ok(resp.bytes().await?.to_vec())
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest)?,
+    );
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk)?;
+    }
+    file.flush()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -657,13 +673,13 @@ async fn install_from_release(spec: &ReleaseSpec) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("Could not find release asset {filename}"))?;
 
     eprintln!("Downloading {filename}...");
-    let bytes = download_bytes(&asset.browser_download_url).await?;
     let temp_dir = unique_temp_dir()?;
     let archive = temp_dir.join(&filename);
-    std::fs::write(&archive, &bytes)?;
-
     let bin = install_dir.join((spec.bin_rel)());
-    let result = unpack(spec, &archive, &filename, &install_dir, &bin);
+    let result = match download_to(&asset.browser_download_url, &archive).await {
+        Ok(()) => unpack(spec, &archive, &filename, &install_dir, &bin),
+        Err(e) => Err(e),
+    };
     std::fs::remove_dir_all(&temp_dir).ok();
     result?;
 
@@ -854,28 +870,15 @@ fn write_jdtls_wrapper(
     write_executable_atomically(wrapper_path, script.as_bytes())
 }
 
-async fn install_jdtls() -> Result<PathBuf> {
-    let java = find_java().ok_or_else(|| {
-        anyhow!(
-            "No JDK found (checked ~/.sdkman/candidates/java/current, $JAVA_HOME, and `java` on PATH).\n\
-             Install one first, e.g. via sdkman: `sdk install java`, then retry."
-        )
-    })?;
-
-    let install_dir = default_install_dir();
-    std::fs::create_dir_all(&install_dir)?;
-    eprintln!(
-        "Fetching Eclipse JDT Language Server (using JDK at {})...",
-        java.display()
-    );
-
-    let bytes = download_bytes(
+/// Downloads the latest jdtls snapshot into `temp_dir` and extracts it
+/// over the jdtls install directory, which it returns.
+async fn download_and_extract_jdtls(temp_dir: &Path) -> Result<PathBuf> {
+    let temp_path = temp_dir.join("jdt-language-server-latest.tar.gz");
+    download_to(
         "https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz",
+        &temp_path,
     )
     .await?;
-    let temp_dir = unique_temp_dir()?;
-    let temp_path = temp_dir.join("jdt-language-server-latest.tar.gz");
-    std::fs::write(&temp_path, &bytes)?;
 
     let dest = jdtls_install_dir();
     if dest.exists() {
@@ -894,7 +897,30 @@ async fn install_jdtls() -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    Ok(dest)
+}
+
+async fn install_jdtls() -> Result<PathBuf> {
+    let java = find_java().ok_or_else(|| {
+        anyhow!(
+            "No JDK found (checked ~/.sdkman/candidates/java/current, $JAVA_HOME, and `java` on PATH).\n\
+             Install one first, e.g. via sdkman: `sdk install java`, then retry."
+        )
+    })?;
+
+    let install_dir = default_install_dir();
+    std::fs::create_dir_all(&install_dir)?;
+    eprintln!(
+        "Fetching Eclipse JDT Language Server (using JDK at {})...",
+        java.display()
+    );
+
+    let temp_dir = unique_temp_dir()?;
+    let result = download_and_extract_jdtls(&temp_dir).await;
+    // On every path: a failed download or extraction used to leave the
+    // partial archive behind in the temp directory.
     std::fs::remove_dir_all(&temp_dir).ok();
+    let dest = result?;
 
     let launcher = find_launcher_jar(&dest).ok_or_else(|| {
         anyhow!(
