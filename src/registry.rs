@@ -284,6 +284,29 @@ pub fn find_project_root_upwards(dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The Cargo workspace a crate at `crate_dir` belongs to: the nearest
+/// directory at or above it whose `Cargo.toml` declares `[workspace]`, the
+/// same upward search Cargo does. Falls back to `crate_dir` itself.
+///
+/// The nearest `Cargo.toml` alone is the wrong root in a workspace: every
+/// member crate would get its own rust-analyzer, and each one loads the
+/// whole workspace anyway (several GB apiece on a large one).
+fn cargo_workspace_root(crate_dir: &Path) -> PathBuf {
+    crate_dir
+        .ancestors()
+        .find(|d| {
+            std::fs::read_to_string(d.join("Cargo.toml")).is_ok_and(|toml| {
+                toml.lines().any(|l| {
+                    // `[workspace] # comment` is still the header.
+                    let l = l.split('#').next().unwrap_or("").trim();
+                    l == "[workspace]" || l.starts_with("[workspace.")
+                })
+            })
+        })
+        .unwrap_or(crate_dir)
+        .to_path_buf()
+}
+
 /// `detect_project_root`, also accepting a bare directory, for which it
 /// probes common entry files. What `server start <dir>` needs.
 ///
@@ -299,6 +322,14 @@ pub fn detect_for_path(path: &Path) -> Option<Detected> {
             .iter()
             .find(|l| l.root_markers.iter().any(|m| path.join(m).exists()))
         {
+            // Same workspace rooting as `detect_project_root`, or
+            // `server start <member crate>` warms a server under a key no
+            // file in that crate resolves to.
+            let root = if lang.name == "rust" {
+                cargo_workspace_root(&root)
+            } else {
+                root
+            };
             return Some(Detected { lang: *lang, root });
         }
     }
@@ -359,10 +390,12 @@ pub fn detect_project_root(file_path: &Path) -> Option<Detected> {
         for lang in &candidates {
             for marker in lang.root_markers {
                 if dir.join(marker).exists() {
-                    return Some(Detected {
-                        lang: *lang,
-                        root: dir,
-                    });
+                    let root = if lang.name == "rust" {
+                        cargo_workspace_root(&dir)
+                    } else {
+                        dir
+                    };
+                    return Some(Detected { lang: *lang, root });
                 }
             }
         }
@@ -427,6 +460,60 @@ mod tests {
         let detected = detect_project_root(&file).unwrap();
         assert_eq!(detected.lang.name, "rust");
         assert_eq!(detected.root, dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rust_member_crate_resolves_to_its_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "").unwrap();
+        let src = dir.path().join("crates/member/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            dir.path().join("crates/member/Cargo.toml"),
+            "[package]\nname = \"member\"\n",
+        )
+        .unwrap();
+        let file = src.join("lib.rs");
+        std::fs::write(&file, "").unwrap();
+
+        let detected = detect_project_root(&file).unwrap();
+        assert_eq!(detected.lang.name, "rust");
+        assert_eq!(detected.root, dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rust_member_crate_directory_resolves_to_its_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace] # all crates\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        let member = dir.path().join("crates/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
+
+        let detected = detect_for_path(&member).unwrap();
+        assert_eq!(detected.lang.name, "rust");
+        assert_eq!(detected.root, dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rust_crate_outside_any_workspace_keeps_its_own_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let krate = dir.path().join("standalone");
+        std::fs::create_dir_all(krate.join("src")).unwrap();
+        std::fs::write(krate.join("Cargo.toml"), "[package]\nname = \"s\"\n").unwrap();
+        let file = krate.join("src/main.rs");
+        std::fs::write(&file, "").unwrap();
+
+        let detected = detect_project_root(&file).unwrap();
+        assert_eq!(detected.root, krate.canonicalize().unwrap());
     }
 
     #[test]
