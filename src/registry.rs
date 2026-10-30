@@ -297,7 +297,8 @@ fn cargo_workspace_root(crate_dir: &Path) -> PathBuf {
         .find(|d| {
             std::fs::read_to_string(d.join("Cargo.toml")).is_ok_and(|toml| {
                 toml.lines().any(|l| {
-                    let l = l.trim();
+                    // `[workspace] # comment` is still the header.
+                    let l = l.split('#').next().unwrap_or("").trim();
                     l == "[workspace]" || l.starts_with("[workspace.")
                 })
             })
@@ -321,6 +322,14 @@ pub fn detect_for_path(path: &Path) -> Option<Detected> {
             .iter()
             .find(|l| l.root_markers.iter().any(|m| path.join(m).exists()))
         {
+            // Same workspace rooting as `detect_project_root`, or
+            // `server start <member crate>` warms a server under a key no
+            // file in that crate resolves to.
+            let root = if lang.name == "rust" {
+                cargo_workspace_root(&root)
+            } else {
+                root
+            };
             return Some(Detected { lang: *lang, root });
         }
     }
@@ -473,6 +482,23 @@ mod tests {
         std::fs::write(&file, "").unwrap();
 
         let detected = detect_project_root(&file).unwrap();
+        assert_eq!(detected.lang.name, "rust");
+        assert_eq!(detected.root, dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rust_member_crate_directory_resolves_to_its_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace] # all crates\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        let member = dir.path().join("crates/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
+
+        let detected = detect_for_path(&member).unwrap();
         assert_eq!(detected.lang.name, "rust");
         assert_eq!(detected.root, dir.path().canonicalize().unwrap());
     }
